@@ -17,8 +17,6 @@ if not exist "%ENV_FILE%" (
     endlocal
     exit /b 1
   )
-) else (
-  rem .env already exists
 )
 
 title ai_rag infra start
@@ -33,6 +31,14 @@ pushd "%~dp0docker"
 if errorlevel 1 goto :err
 
 docker compose --env-file "%ENV_FILE%" up -d
+if errorlevel 1 goto :err
+
+popd
+
+call "%~dp0check_postgres_auth.bat"
+if errorlevel 1 goto :err
+
+pushd "%~dp0docker"
 if errorlevel 1 goto :err
 
 docker compose --env-file "%ENV_FILE%" run --rm db-migrator

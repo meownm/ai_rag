@@ -1,94 +1,42 @@
 #!/usr/bin/env sh
 set -eu
 
-escape_sql() {
-  # Escape single quotes for SQL literals.
-  printf "%s" "$1" | sed "s/'/''/g"
-}
+# Expected env vars are provided via docker-compose service 'db-migrator'.
+# We defensively default optional vars to empty strings to keep psql variable substitution valid.
+: "${POSTGRES_HOST:=postgres}"
+: "${POSTGRES_PORT:=5432}"
+: "${POSTGRES_DB:=postgres}"
+: "${POSTGRES_SUPERUSER:=postgres}"
+: "${POSTGRES_SUPERPASS:=postgres}"
 
-until pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" >/dev/null 2>&1; do
-  sleep 1
+# Optional: roles and schemas
+: "${POSTGRES_APP_USER:=}"
+: "${POSTGRES_APP_PASS:=}"
+: "${POSTGRES_READONLY_USER:=}"
+: "${POSTGRES_READONLY_PASS:=}"
+: "${POSTGRES_SCHEMA_APP:=app}"
+: "${POSTGRES_SCHEMA_LOGS:=logs}"
+
+export PGPASSWORD="${POSTGRES_SUPERPASS}"
+
+PSQL_BASE="psql -h ${POSTGRES_HOST} -p ${POSTGRES_PORT} -U ${POSTGRES_SUPERUSER} -d ${POSTGRES_DB} -v ON_ERROR_STOP=1"
+# Ensure psql variables always exist (even if empty) so SQL containing :'<var>' won't break.
+PSQL_VARS=" -v app_user=${POSTGRES_APP_USER} -v app_pass=${POSTGRES_APP_PASS} -v readonly_user=${POSTGRES_READONLY_USER} -v readonly_pass=${POSTGRES_READONLY_PASS} -v schema_app=${POSTGRES_SCHEMA_APP} -v schema_logs=${POSTGRES_SCHEMA_LOGS}"
+
+MIGRATIONS_DIR="${MIGRATIONS_DIR:-/migrations}"
+
+if [ ! -d "${MIGRATIONS_DIR}" ]; then
+  echo "[ERROR] Migrations dir not found: ${MIGRATIONS_DIR}" >&2
+  exit 1
+fi
+
+echo "[INFO] Running migrations from ${MIGRATIONS_DIR} ..."
+
+# Run in lexical order
+for f in $(ls -1 "${MIGRATIONS_DIR}"/*.sql 2>/dev/null | sort); do
+  echo "[INFO] Applying $(basename "$f")"
+  # shellcheck disable=SC2086
+  sh -c "${PSQL_BASE} ${PSQL_VARS} -f \"$f\""
 done
 
-APP_USER="$(escape_sql "${POSTGRES_APP_USER:-}")"
-APP_PASS="$(escape_sql "${POSTGRES_APP_PASS:-}")"
-RO_USER="$(escape_sql "${POSTGRES_READONLY_USER:-}")"
-RO_PASS="$(escape_sql "${POSTGRES_READONLY_PASS:-}")"
-SCHEMA_APP="$(escape_sql "${POSTGRES_SCHEMA_APP:-app}")"
-SCHEMA_LOGS="$(escape_sql "${POSTGRES_SCHEMA_LOGS:-logs}")"
-
-# 1) Ensure migrations registry exists.
-psql -v ON_ERROR_STOP=1 -f /migrations/000_schema_migrations.sql
-
-# 2) Create/rotate roles and grant CONNECT (idempotent).
-# Passwords live in .env (closed test contour). Avoid quotes/newlines in passwords.
-psql -v ON_ERROR_STOP=1   -v app_user="$APP_USER" -v app_pass="$APP_PASS"   -v ro_user="$RO_USER"  -v ro_pass="$RO_PASS"   -v schema_app="$SCHEMA_APP" -v schema_logs="$SCHEMA_LOGS"   <<'SQL'
-DO $body$
-BEGIN
-  IF :'app_user' <> '' THEN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'app_user') THEN
-      EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', :'app_user', :'app_pass');
-    ELSE
-      EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_pass');
-    END IF;
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'app_user');
-  END IF;
-
-  IF :'ro_user' <> '' THEN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ro_user') THEN
-      EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', :'ro_user', :'ro_pass');
-    ELSE
-      EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'ro_user', :'ro_pass');
-    END IF;
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), :'ro_user');
-  END IF;
-END
-$body$ LANGUAGE plpgsql;
-SQL
-
-# 3) Apply versioned migrations (idempotent by schema_migrations table).
-for f in $(ls -1 /migrations/*.sql | sort); do
-  ver="$(basename "$f")"
-  if [ "$ver" = "000_schema_migrations.sql" ]; then
-    continue
-  fi
-  applied="$(psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM public.schema_migrations WHERE version='${ver}'" | tr -d '[:space:]' || true)"
-  if [ "$applied" = "1" ]; then
-    echo "[SKIP] $ver"
-    continue
-  fi
-  echo "[APPLY] $ver"
-  psql -v ON_ERROR_STOP=1 -f "$f"
-  psql -v ON_ERROR_STOP=1 -c "INSERT INTO public.schema_migrations(version) VALUES ('${ver}')"
-done
-
-# 4) Grants on schemas/tables (idempotent).
-psql -v ON_ERROR_STOP=1   -v app_user="$APP_USER" -v ro_user="$RO_USER"   -v schema_app="$SCHEMA_APP" -v schema_logs="$SCHEMA_LOGS"   <<'SQL'
-DO $body$
-BEGIN
-  IF :'app_user' <> '' THEN
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_app', :'app_user');
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_logs', :'app_user');
-
-    EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA %I TO %I', :'schema_app', :'app_user');
-    EXECUTE format('GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', :'schema_app', :'app_user');
-
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO %I', :'schema_app', :'app_user');
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE,SELECT,UPDATE ON SEQUENCES TO %I', :'schema_app', :'app_user');
-  END IF;
-
-  IF :'ro_user' <> '' THEN
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_app', :'ro_user');
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', :'schema_logs', :'ro_user');
-
-    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', :'schema_app', :'ro_user');
-    EXECUTE format('GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', :'schema_app', :'ro_user');
-
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT ON TABLES TO %I', :'schema_app', :'ro_user');
-    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE,SELECT ON SEQUENCES TO %I', :'schema_app', :'ro_user');
-  END IF;
-END
-$body$ LANGUAGE plpgsql;
-SQL
-
-echo "[INFO] DB migrations and grants done."
+echo "[INFO] Migrations applied successfully."

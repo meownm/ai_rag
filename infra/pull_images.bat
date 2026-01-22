@@ -19,29 +19,26 @@ if not exist "%ENV_FILE%" (
   )
 )
 
-title ai_rag deploy_docker_desktop
+title ai_rag pull_images
 
 call "%~dp0install_prereqs.bat"
 if errorlevel 1 goto :err
 
-call "%~dp0install.bat"
+pushd "%~dp0docker"
 if errorlevel 1 goto :err
 
-call "%~dp0pull_images.bat"
+echo [INFO] Pulling images...
+rem Some Docker Compose versions do not support --progress for pull.
+docker compose --env-file "%ENV_FILE%" pull
 if errorlevel 1 goto :err
 
-call "%~dp0start.bat"
-if errorlevel 1 goto :err
-
-call "%~dp0smoke_test.bat"
-if errorlevel 1 goto :err
-
-echo [INFO] deploy completed
+popd
 endlocal
 exit /b 0
 
 :err
-echo [ERROR] deploy failed.
+echo [ERROR] pull_images failed.
+popd
 pause
 endlocal
 exit /b 1
