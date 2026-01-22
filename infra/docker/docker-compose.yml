@@ -53,7 +53,7 @@ services:
       - redis_data:/data
 
   minio:
-    image: minio/minio:RELEASE.2025-01-20T00-00-00Z
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
     container_name: ${PROJECT_NAME}-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"

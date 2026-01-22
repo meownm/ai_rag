@@ -37,6 +37,7 @@ if errorlevel 1 goto :err
 
 echo [INFO] deploy completed
 endlocal
+pause
 exit /b 0
 
 :err
