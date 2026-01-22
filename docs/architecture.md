@@ -1,13 +1,38 @@
 # Architecture
 
-EPIC-01: базовая инфраструктура + минимальный рабочий контур сервисов.
+## Область EPIC-01
 
-Компоненты:
-- PostgreSQL + pgvector + pg_trgm + unaccent
-- MinIO
-- Redis
-- Prometheus + Grafana + Loki/Promtail
-- pgAdmin + Adminer + pgHero
-- 4 сервиса: gateway-api, ingest-service, search-api, admin-api
+EPIC-01 закрывает только инфраструктурный слой и подготовку базы данных под FTS. Репозиторий уже содержит каталоги `services/`, `tgbot/`, `web/`, но эти части считаются заглушками до следующих эпиков.
 
-Запуск: `infra\deploy_docker_desktop.bat`.
+## Компоненты инфраструктуры
+
+Компоненты поднимаются через Docker Compose (Docker Desktop, Windows/WSL2):
+
+- PostgreSQL 16
+  - расширения: `pg_trgm`, `unaccent`, (опционально: `vector` установлен, но не используется в EPIC-01)
+  - схема `app` с таблицей `documents` и FTS индексами
+  - схема `logs` зарезервирована под логи сервисов в следующих эпиках
+  - роли: `POSTGRES_APP_USER` (чтение/запись в `app`), `POSTGRES_READONLY_USER` (только чтение)
+- MinIO (объектное хранилище) + инициализатор бакетов
+- Redis (кэш/очереди, зарезервировано)
+- Наблюдаемость:
+  - Prometheus
+  - Grafana (datasource provisioning)
+  - Loki + Promtail (сбор логов контейнеров Docker)
+- Админ-инструменты:
+  - pgAdmin
+  - Adminer
+  - pgHero
+
+## Границы системы
+
+EPIC-01 не включает:
+- API сервисы (gateway/search/ingest/admin)
+- LLM и embedding пайплайны
+- индексацию документов из файловой системы
+
+## Соглашения
+
+- Все конфигурации через `.env`, шаблон: `.env.example`.
+- Порты выдаются диапазонами по 100 и фиксируются в `ports_registry.md`.
+- Скрипты `.bat` всегда останавливаются на ошибке и делают `pause` в ветке ошибки.

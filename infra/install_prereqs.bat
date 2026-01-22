@@ -1,7 +1,6 @@
-\
 @echo off
 setlocal
-title rag-platform install_prereqs
+title ai_rag install_prereqs
 
 docker version >nul 2>&1
 if errorlevel 1 (
