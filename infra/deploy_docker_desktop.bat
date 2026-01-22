@@ -1,4 +1,3 @@
-@echo off
 setlocal
 set "ROOT_DIR=%~dp0.."
 set "ENV_FILE=%ROOT_DIR%\.env"
@@ -38,6 +37,8 @@ if errorlevel 1 goto :err
 
 echo [INFO] deploy completed
 endlocal
+pause
+
 exit /b 0
 
 :err
