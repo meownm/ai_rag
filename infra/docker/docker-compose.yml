@@ -1,0 +1,183 @@
+name: ${PROJECT_NAME}
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: ${PROJECT_NAME}-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERPASS}
+    ports:
+      - "${POSTGRES_HOST_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  db-migrator:
+    image: postgres:16
+    container_name: ${PROJECT_NAME}-db-migrator
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB}
+      PGUSER: ${POSTGRES_SUPERUSER}
+      PGPASSWORD: ${POSTGRES_SUPERPASS}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+      POSTGRES_APP_PASS: ${POSTGRES_APP_PASS}
+      POSTGRES_READONLY_USER: ${POSTGRES_READONLY_USER}
+      POSTGRES_READONLY_PASS: ${POSTGRES_READONLY_PASS}
+      POSTGRES_SCHEMA_APP: ${POSTGRES_SCHEMA_APP}
+      POSTGRES_SCHEMA_LOGS: ${POSTGRES_SCHEMA_LOGS}
+    volumes:
+      - ./postgres/migrations:/migrations:ro
+      - ./postgres/migrator/run_migrations.sh:/run_migrations.sh:ro
+    entrypoint: ["/bin/sh", "/run_migrations.sh"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${PROJECT_NAME}-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_HOST_PORT}:6379"
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T00-00-00Z
+    container_name: ${PROJECT_NAME}-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_HOST_PORT}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT}:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-01-17T23-25-50Z
+    container_name: ${PROJECT_NAME}-minio-init
+    restart: "no"
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_DOCUMENTS: ${MINIO_BUCKET_DOCUMENTS}
+      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET}
+    entrypoint: >
+      /bin/sh -c "
+      i=0;
+      while [ $$i -lt 60 ]; do
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD >/dev/null 2>&1 && break;
+        i=$$((i+1));
+        sleep 1;
+      done;
+      mc mb -p local/$$MINIO_BUCKET_DOCUMENTS || true;
+      mc mb -p local/$$MINIO_DEFAULT_BUCKET || true;
+      echo '[INFO] MinIO init done.';
+      "
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: ${PROJECT_NAME}-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_HOST_PORT}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: ${PROJECT_NAME}-loki
+    restart: unless-stopped
+    ports:
+      - "${LOKI_HOST_PORT}:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    container_name: ${PROJECT_NAME}-promtail
+    restart: unless-stopped
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./promtail/promtail.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: ${PROJECT_NAME}-grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_HOST_PORT}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - loki
+
+  adminer:
+    image: adminer:4
+    container_name: ${PROJECT_NAME}-adminer
+    restart: unless-stopped
+    ports:
+      - "${ADMINER_HOST_PORT}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pghero:
+    image: ankane/pghero:latest
+    container_name: ${PROJECT_NAME}-pghero
+    restart: unless-stopped
+    ports:
+      - "${PGHERO_HOST_PORT}:8080"
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_SUPERUSER}:${POSTGRES_SUPERPASS}@postgres:5432/${POSTGRES_DB}"
+      PGHERO_USERNAME: "${PGHERO_USERNAME}"
+      PGHERO_PASSWORD: "${PGHERO_PASSWORD}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: ${PROJECT_NAME}-pgadmin
+    restart: unless-stopped
+    ports:
+      - "${PGADMIN_HOST_PORT}:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+  pgadmin_data:

@@ -1,35 +1,26 @@
-# RAG Knowledge Platform (Local / Closed Test Contour)
+# rag-platform
 
-## Purpose
-Local knowledge platform with:
-- document ingestion from folders and user uploads (PDF/DOCX/DOC/TXT)
-- hybrid search (full-text + semantic)
-- RAG answer generation with strict structured output
-- interfaces: Telegram Bot, Telegram Mini App, Web
-- access model: global admin, organizations, roles (org admin/editor/reader)
-- infrastructure: Docker Desktop (Windows/WSL2), PostgreSQL + pgvector, MinIO
+Локальный контур для RAG-платформы (Docker Desktop). Цель: нулевой ручной старт.
 
-## Repo layout
-- `infra/` — local infrastructure (Docker Compose, scripts, env templates)
-- `docs/` — project documentation (requirements, decisions, architecture, pipeline trace, etc.)
-- `services/` — application services (placeholders for next epics)
-- `tgbot/` — Telegram bot (placeholder for later epics)
-- `web/` — Web UI (placeholder for later epics)
+## Быстрый старт
 
-## How to start (infrastructure only)
-1. Copy `infra/.env.example` to `infra/.env` and adjust if needed.
-2. Run `infra\install_infra.bat`
-3. Run `infra\start_infra.bat`
-4. Open:
-   - PostgreSQL: `localhost:5432`
-   - PGHero: `http://localhost:8081`
-   - MinIO Console: `http://localhost:9001`
+1. Скопировать `.env.example` в `.env` и при необходимости поменять пароли.
+2. Запуск одной командой:
 
-## Current status
-This repository contains the baseline scaffolding:
-- documentation set
-- infrastructure compose + scripts
-- env templates
-- backlog and epic boundaries
+```bat
+infra\deploy_docker_desktop.bat
+```
 
-Application services are intentionally placeholders until EPIC sequencing begins.
+## Ссылки (по умолчанию)
+
+- gateway-api: http://localhost:6103/docs
+- ingest-service: http://localhost:6102/docs
+- search-api: http://localhost:6101/docs
+- admin-api: http://localhost:6104/docs
+- Grafana: http://localhost:5602
+- Prometheus: http://localhost:5601
+- pgAdmin: http://localhost:5701
+- Adminer: http://localhost:5702
+- pgHero: http://localhost:5703
+- MinIO Console: http://localhost:5704
+- MinIO API: http://localhost:5705
