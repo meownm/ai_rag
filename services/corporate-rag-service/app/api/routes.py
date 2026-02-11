@@ -4,12 +4,12 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import Chunks, ChunkVectors, Documents, IngestJobs
+from app.db.repositories import TenantRepository
+from app.models.models import IngestJobs
 from app.schemas.api import (
     ErrorEnvelope,
     ErrorInfo,
@@ -63,24 +63,14 @@ def health() -> HealthResponse:
 
 @router.post("/v1/ingest/sources/sync", response_model=JobAcceptedResponse, status_code=202)
 def start_source_sync(payload: SourceSyncRequest, db: Session = Depends(get_db)) -> JobAcceptedResponse:
-    job = IngestJobs(tenant_id=payload.tenant_id, job_type="REINDEX_ALL", job_status="processing", requested_by="api")
-    db.add(job)
-    db.commit()
-    db.refresh(job)
+    repo = TenantRepository(db, payload.tenant_id)
+    job = repo.create_job(job_type="REINDEX_ALL", requested_by="api")
 
     try:
         ingest_sources_sync(db, payload.tenant_id, payload.source_types)
-        job.job_status = "done"
-        job.finished_at = datetime.now(timezone.utc)
-        db.add(job)
-        db.commit()
+        repo.mark_job(job, "done")
     except Exception as exc:  # noqa: BLE001
-        job.job_status = "error"
-        job.error_code = "SOURCE_FETCH_FAILED"
-        job.error_message = str(exc)
-        job.finished_at = datetime.now(timezone.utc)
-        db.add(job)
-        db.commit()
+        repo.mark_job(job, "error", error_code="SOURCE_FETCH_FAILED", error_message=str(exc))
         raise
 
     return JobAcceptedResponse(job_id=job.job_id, job_status=job.job_status)
@@ -101,87 +91,18 @@ def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> JobStatusRespon
     )
 
 
-def _fetch_lexical_candidate_scores(db: Session, tenant_id: str, query: str, top_n: int) -> tuple[dict[str, float], int]:
-    t0 = time.perf_counter()
-    rows = db.execute(
-        text(
-            """
-            SELECT cf.chunk_id::text AS chunk_id,
-                   ts_rank_cd(cf.fts_doc, plainto_tsquery('simple', :query_text)) AS lex_score
-            FROM chunk_fts cf
-            WHERE cf.tenant_id = CAST(:tenant_id AS uuid)
-              AND cf.fts_doc @@ plainto_tsquery('simple', :query_text)
-            ORDER BY lex_score DESC
-            LIMIT :limit_n
-            """
-        ),
-        {"tenant_id": tenant_id, "query_text": query, "limit_n": top_n},
-    ).mappings().all()
-    lexical_ms = int((time.perf_counter() - t0) * 1000)
-    return {row["chunk_id"]: float(row["lex_score"] or 0.0) for row in rows}, lexical_ms
-
-
-def _fetch_vector_candidates(db: Session, tenant_id: str, top_n: int) -> list[dict]:
-    rows = (
-        db.query(Chunks, Documents, ChunkVectors)
-        .join(Documents, Documents.document_id == Chunks.document_id)
-        .join(ChunkVectors, ChunkVectors.chunk_id == Chunks.chunk_id)
-        .filter(Chunks.tenant_id == tenant_id)
-        .order_by(Chunks.ordinal.asc())
-        .limit(top_n)
-        .all()
-    )
-    return [
-        {
-            "chunk_id": str(chunk.chunk_id),
-            "document_id": document.document_id,
-            "chunk_text": chunk.chunk_text,
-            "title": document.title,
-            "url": document.url or "",
-            "heading_path": chunk.chunk_path.split("/") if chunk.chunk_path else [],
-            "labels": document.labels or [],
-            "author": document.author,
-            "updated_at": document.updated_date.isoformat() if document.updated_date else "",
-            "embedding": list(vector.embedding),
-        }
-        for chunk, document, vector in rows
-    ]
-
-
 def _fetch_candidates(db: Session, tenant_id: str, query: str, top_n: int) -> tuple[list[dict], int]:
+    repo = TenantRepository(db, tenant_id)
     k_lex = max(top_n, settings.DEFAULT_TOP_K)
     k_vec = max(top_n, settings.RERANKER_TOP_K)
 
-    lexical_scores, lexical_ms = _fetch_lexical_candidate_scores(db, tenant_id, query, k_lex)
-    vector_candidates = _fetch_vector_candidates(db, tenant_id, k_vec)
+    t0 = time.perf_counter()
+    lexical_scores = repo.fetch_lexical_candidate_scores(query, k_lex)
+    lexical_ms = int((time.perf_counter() - t0) * 1000)
+    vector_candidates = repo.fetch_vector_candidates(k_vec)
 
     chunk_ids = set(lexical_scores.keys()) | {c["chunk_id"] for c in vector_candidates}
-
-    rows = (
-        db.query(Chunks, Documents, ChunkVectors)
-        .join(Documents, Documents.document_id == Chunks.document_id)
-        .join(ChunkVectors, ChunkVectors.chunk_id == Chunks.chunk_id)
-        .filter(Chunks.tenant_id == tenant_id)
-        .filter(Chunks.chunk_id.in_(chunk_ids))
-        .all()
-    ) if chunk_ids else []
-
-    candidates = [
-        {
-            "chunk_id": str(chunk.chunk_id),
-            "document_id": document.document_id,
-            "chunk_text": chunk.chunk_text,
-            "title": document.title,
-            "url": document.url or "",
-            "heading_path": chunk.chunk_path.split("/") if chunk.chunk_path else [],
-            "labels": document.labels or [],
-            "author": document.author,
-            "updated_at": document.updated_date.isoformat() if document.updated_date else "",
-            "embedding": list(vector.embedding),
-            "lex_score": lexical_scores.get(str(chunk.chunk_id), 0.0),
-        }
-        for chunk, document, vector in rows
-    ]
+    candidates = repo.hydrate_candidates(chunk_ids, lexical_scores)
     return candidates, lexical_ms
 
 
@@ -209,8 +130,9 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
     ranked, timers = hybrid_rank(payload.query, candidates, query_embedding)
     reranked, t_rerank = get_reranker().rerank(payload.query, ranked)
     ranked_final, _ = hybrid_rank(payload.query, reranked, query_embedding)
+    tenant_safe_ranked = [c for c in ranked_final if c.get("tenant_id") == str(payload.tenant_id)]
 
-    chosen = ranked_final[: payload.top_k]
+    chosen = tenant_safe_ranked[: payload.top_k]
     answer = " ".join([c["chunk_text"] for c in chosen[:2]]) if chosen else ""
     valid, anti_payload = verify_answer(
         answer,
