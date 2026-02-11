@@ -8,10 +8,13 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "embeddings-service"
     version: str
+    default_model_id: str | None = None
+    embedding_dim: int | None = None
+    loaded_models: list[str] = Field(default_factory=list)
 
 
 class EmbeddingsRequest(BaseModel):
-    model: str
+    model: str | None = None
     input: list[str] = Field(min_length=1, max_length=256)
     encoding_format: str = "float"
     tenant_id: UUID | None = None
@@ -33,3 +36,8 @@ class EmbeddingsResponse(BaseModel):
     model: str
     data: list[EmbeddingData]
     usage: EmbeddingsUsage
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+    error_code: str

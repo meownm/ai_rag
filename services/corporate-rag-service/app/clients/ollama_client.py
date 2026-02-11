@@ -10,11 +10,12 @@ class OllamaClient:
         self.model = str(model)
         self.timeout_seconds = float(timeout_seconds)
 
-    def generate(self, prompt: str) -> dict:
+    def generate(self, prompt: str, *, keep_alive: int = 0) -> dict:
         payload = {
             "model": self.model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": keep_alive,
             "options": {"temperature": 0, "top_p": 1},
         }
         import httpx

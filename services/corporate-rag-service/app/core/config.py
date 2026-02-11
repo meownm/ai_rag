@@ -28,6 +28,21 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1"
     EMBEDDINGS_SERVICE_URL: str = "http://localhost:8200"
     EMBEDDINGS_SERVICE_PORT: int = 8200
+    EMBEDDINGS_DEFAULT_MODEL_ID: str = "bge-m3"
+    EMBEDDINGS_BATCH_SIZE: int = 64
+    EMBEDDINGS_RETRY_ATTEMPTS: int = 3
+    USE_VECTOR_RETRIEVAL: bool = False
+    HYBRID_SCORE_NORMALIZATION: bool = False
+    USE_CONTEXTUAL_EXPANSION: bool = False
+    NEIGHBOR_WINDOW: int = 1
+    USE_TOKEN_BUDGET_ASSEMBLY: bool = False
+    MAX_CONTEXT_TOKENS: int = 8000
+    USE_LLM_GENERATION: bool = False
+
+    CHUNK_TARGET_TOKENS: int = 650
+    CHUNK_MAX_TOKENS: int = 900
+    CHUNK_MIN_TOKENS: int = 120
+    CHUNK_OVERLAP_TOKENS: int = 80
 
     LOG_DATA_MODE: str = "PLAIN"
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

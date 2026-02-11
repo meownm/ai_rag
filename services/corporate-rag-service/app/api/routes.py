@@ -26,7 +26,7 @@ from app.schemas.api import (
 )
 from app.services.anti_hallucination import build_structured_refusal, verify_answer
 from app.services.audit import log_event
-from app.services.ingestion import ingest_sources_sync
+from app.services.ingestion import EmbeddingIndexingError, ingest_sources_sync
 from app.services.performance import build_stage_budgets, exceeded_budgets
 from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
@@ -98,6 +98,20 @@ def _build_llm_prompt(query: str, contexts: list[dict]) -> str:
     )
 
 
+def _estimate_token_count(text: str) -> int:
+    words = len(text.split())
+    return max(1, int(words * 1.33)) if text.strip() else 0
+
+
+def _build_retrieval_only_answer(contexts: list[dict]) -> str:
+    selected = [c.get("chunk_text", "").strip() for c in contexts[:2] if c.get("chunk_text", "").strip()]
+    return "\n\n".join(selected)
+
+
+def _is_plain_log_mode() -> bool:
+    return settings.LOG_DATA_MODE.strip().lower() == "plain"
+
+
 def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int]:
     repo = TenantRepository(db, tenant_id)
     k_lex = max(top_n, settings.DEFAULT_TOP_K)
@@ -106,7 +120,7 @@ def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: 
     t0 = time.perf_counter()
     lexical_scores = repo.fetch_lexical_candidate_scores(query, k_lex)
     lexical_ms = int((time.perf_counter() - t0) * 1000)
-    vector_candidates = repo.fetch_vector_candidates(query_embedding, k_vec)
+    vector_candidates = repo.fetch_vector_candidates(query_embedding, k_vec, use_similarity=settings.USE_VECTOR_RETRIEVAL)
     vector_score_map = {c["chunk_id"]: c["vec_score"] for c in vector_candidates}
 
     chunk_ids = set(lexical_scores.keys()) | set(vector_score_map.keys())
@@ -127,6 +141,9 @@ def start_source_sync(payload: SourceSyncRequest, db: Session = Depends(get_db))
     try:
         ingest_sources_sync(db, payload.tenant_id, payload.source_types)
         repo.mark_job(job, "done")
+    except EmbeddingIndexingError as exc:
+        repo.mark_job(job, "error", error_code="S-EMB-INDEX-FAILED", error_message=str(exc))
+        raise _error("S-EMB-INDEX-FAILED", "Embedding indexing failed", uuid.uuid4(), True, status.HTTP_502_BAD_GATEWAY)
     except Exception as exc:  # noqa: BLE001
         repo.mark_job(job, "error", error_code="SOURCE_FETCH_FAILED", error_message=str(exc))
         raise
@@ -156,7 +173,7 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
     log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", payload.model_dump())
 
     try:
-        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": payload.query, "model": "bge-m3"})
+        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": payload.query, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
         query_embedding = get_embeddings_client().embed_text(payload.query, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
         log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_RESPONSE", {"dimensions": len(query_embedding)})
     except Exception as exc:  # noqa: BLE001
@@ -167,29 +184,69 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
     candidates, lexical_ms = _fetch_candidates(db, str(payload.tenant_id), payload.query, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
     t_parse_ms = int((time.perf_counter() - t_parse0) * 1000)
 
-    ranked, timers = hybrid_rank(payload.query, candidates, query_embedding)
+    ranked, timers = hybrid_rank(
+        payload.query,
+        candidates,
+        query_embedding,
+        normalize_scores=settings.HYBRID_SCORE_NORMALIZATION,
+    )
     reranked, t_rerank = get_reranker().rerank(payload.query, ranked)
-    ranked_final, _ = hybrid_rank(payload.query, reranked, query_embedding)
+    ranked_final, _ = hybrid_rank(
+        payload.query,
+        reranked,
+        query_embedding,
+        normalize_scores=settings.HYBRID_SCORE_NORMALIZATION,
+    )
     tenant_safe_ranked = [c for c in ranked_final if c.get("tenant_id") == str(payload.tenant_id)]
-    chosen = expand_neighbors(db, str(payload.tenant_id), tenant_safe_ranked, payload.top_k)
-    chosen, budget_log = apply_context_budget(chosen)
+    chosen = expand_neighbors(
+        db,
+        str(payload.tenant_id),
+        tenant_safe_ranked,
+        payload.top_k,
+        use_contextual_expansion=settings.USE_CONTEXTUAL_EXPANSION,
+        neighbor_window=settings.NEIGHBOR_WINDOW,
+    )
+    chosen, budget_log = apply_context_budget(
+        chosen,
+        use_token_budget_assembly=settings.USE_TOKEN_BUDGET_ASSEMBLY,
+        max_context_tokens=settings.MAX_CONTEXT_TOKENS,
+    )
 
     only_sources = "PASS"
+    anti_payload = {"refusal_triggered": False, "unsupported_sentences": 0}
+    t_llm_ms = 0
+    llm_tokens_est = 0
+    llm_completion_tokens_est = 0
+
     if not chosen:
         answer = build_structured_refusal(str(corr), {"reason": "no_sources"})
         anti_payload = {"refusal_triggered": True, "unsupported_sentences": 0}
         only_sources = "FAIL"
+    elif not settings.USE_LLM_GENERATION:
+        answer = _build_retrieval_only_answer(chosen)
     else:
         prompt = _build_llm_prompt(payload.query, chosen)
+        llm_tokens_est = _estimate_token_count(prompt)
         llm_start = time.perf_counter()
         try:
-            log_event(db, str(payload.tenant_id), str(corr), "LLM_REQUEST", {"model": settings.LLM_MODEL, "prompt": prompt})
-            llm_payload = get_ollama_client().generate(prompt)
-            log_event(db, str(payload.tenant_id), str(corr), "LLM_RESPONSE", {"raw": llm_payload})
+            request_log_payload = {"model": settings.LLM_MODEL, "keep_alive": 0, "prompt_tokens_est": llm_tokens_est}
+            if _is_plain_log_mode():
+                request_log_payload["prompt"] = prompt
+            log_event(db, str(payload.tenant_id), str(corr), "LLM_REQUEST", request_log_payload)
+            llm_payload = get_ollama_client().generate(prompt, keep_alive=0)
             if isinstance(llm_payload, dict):
                 llm_raw = str(llm_payload.get("response", ""))
             else:
                 llm_raw = str(llm_payload)
+            llm_completion_tokens_est = _estimate_token_count(llm_raw)
+            response_log_payload = {
+                "model": settings.LLM_MODEL,
+                "keep_alive": 0,
+                "completion_tokens_est": llm_completion_tokens_est,
+            }
+            if _is_plain_log_mode():
+                response_log_payload["raw"] = llm_payload
+            log_event(db, str(payload.tenant_id), str(corr), "LLM_RESPONSE", response_log_payload)
         except Exception as exc:  # noqa: BLE001
             llm_raw = ""
             log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "LLM_PROVIDER_ERROR", "message": str(exc)})
@@ -212,7 +269,6 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
             if not valid or not answer:
                 answer = build_structured_refusal(str(corr), anti_payload)
                 only_sources = "FAIL"
-    t_llm_ms = locals().get("t_llm_ms", 0)
 
     t_citations0 = time.perf_counter()
     citations = [
@@ -243,6 +299,8 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
         "t_total_ms": t_total_ms,
         "t_llm_ms": t_llm_ms,
         "t_citations_ms": t_citations_ms,
+        "llm_prompt_tokens_est": llm_tokens_est,
+        "llm_completion_tokens_est": llm_completion_tokens_est,
         **budget_log,
     }
     budgets = build_stage_budgets(settings.REQUEST_TIMEOUT_SECONDS, settings.EMBEDDINGS_TIMEOUT_SECONDS)
