@@ -12,7 +12,7 @@
 ## Validation
 - Corporate service tests: `cd services/corporate-rag-service && poetry run pytest`
 - Embeddings service tests: `cd services/embeddings-service && poetry run pytest`
-- Drift detector: `python scripts/drift_detector.py`
+- Drift detector (includes dependency alignment checks for shared Python runtime packages): `python scripts/drift_detector.py`
 
 ## Embeddings service configuration
 - `EMBEDDINGS_DEFAULT_MODEL_ID` (default: `bge-m3`) — model used when `POST /v1/embeddings` payload omits `model`.
