@@ -17,6 +17,13 @@ The following environment variables were added for conversational memory, rewrit
 
 See also `.env.example` for runnable defaults.
 
+## Ingestion contract (markdown-only)
+
+Ingestion runtime in this service is markdown-only: crawlers provide markdown `SourceItem` payloads, and no PDF/DOCX byte conversion is performed here.
+
+See: `docs/contracts/ingestion_contract_markdown_only.md`.
+
+
 ## Windows smoke test
 
 ```powershell
