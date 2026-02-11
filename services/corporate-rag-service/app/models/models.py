@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +32,9 @@ ERROR_CODE = (
     "RATE_LIMITED", "INTERNAL_ERROR",
 )
 ONLY_SOURCES_VERDICT = ("PASS", "FAIL")
+CONVERSATION_STATUS = ("active", "archived")
+CONVERSATION_ROLE = ("user", "assistant", "system")
+REWRITE_STRATEGY = ("none", "llm_rewrite")
 
 
 class Tenants(Base):
@@ -206,3 +209,76 @@ class SearchRequests(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     query_text: Mapped[str] = mapped_column(Text)
     citations_requested: Mapped[bool] = mapped_column()
+
+
+class Conversations(Base):
+    __tablename__ = "conversations"
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    status: Mapped[str] = mapped_column(Enum(*CONVERSATION_STATUS, name="conversation_status"), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class ConversationTurns(Base):
+    __tablename__ = "conversation_turns"
+    __table_args__ = (UniqueConstraint("conversation_id", "turn_index", name="uq_conversation_turns_conversation_turn_index"),)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversations.conversation_id"), index=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(Enum(*CONVERSATION_ROLE, name="conversation_role"))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class QueryResolutions(Base):
+    __tablename__ = "query_resolutions"
+    resolution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversation_turns.turn_id"), index=True)
+    resolved_query_text: Mapped[str] = mapped_column(Text)
+    rewrite_strategy: Mapped[str] = mapped_column(Enum(*REWRITE_STRATEGY, name="rewrite_strategy"), default="none")
+    rewrite_inputs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    rewrite_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    topic_shift_detected: Mapped[bool] = mapped_column(default=False)
+    needs_clarification: Mapped[bool] = mapped_column(default=False)
+    clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class RetrievalTraceItems(Base):
+    __tablename__ = "retrieval_trace_items"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "conversation_id", "turn_id", "document_id", "chunk_id", "ordinal", name="pk_retrieval_trace_items"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    chunk_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    score_lex_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_vec_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_rerank_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_final: Mapped[float | None] = mapped_column(Float, nullable=True)
+    used_in_context: Mapped[bool] = mapped_column(default=False)
+    used_in_answer: Mapped[bool] = mapped_column(default=False)
+    citation_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class ConversationSummaries(Base):
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id", "summary_version", name="uq_conversation_summaries_tenant_conversation_version"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    summary_version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    summary_text: Mapped[str] = mapped_column(Text)
+    covers_turn_index_to: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

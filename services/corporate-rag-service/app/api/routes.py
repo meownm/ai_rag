@@ -2,16 +2,16 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.clients.embeddings_client import EmbeddingsClient
 from app.clients.ollama_client import OllamaClient
 from app.core.config import settings
-from app.db.repositories import TenantRepository
+from app.db.repositories import ConversationRepository, TenantRepository
 from app.db.session import get_db
 from app.models.models import IngestJobs
 from app.schemas.api import (
@@ -32,6 +32,8 @@ from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
 from app.services.scoring_trace import build_scoring_trace
+from app.runners.conversation_summarizer import ConversationSummarizer
+from app.runners.query_rewriter import QueryRewriteError, QueryRewriter
 
 router = APIRouter()
 
@@ -48,6 +50,14 @@ def get_embeddings_client() -> EmbeddingsClient:
 @lru_cache
 def get_ollama_client() -> OllamaClient:
     return OllamaClient(settings.LLM_ENDPOINT, settings.LLM_MODEL, settings.REQUEST_TIMEOUT_SECONDS)
+
+
+def get_query_rewriter() -> QueryRewriter:
+    return QueryRewriter(model_id=settings.REWRITE_MODEL_ID, keep_alive=settings.REWRITE_KEEP_ALIVE)
+
+
+def get_conversation_summarizer() -> ConversationSummarizer:
+    return ConversationSummarizer(model_id=settings.REWRITE_MODEL_ID)
 
 
 def _error(code: str, message: str, correlation_id: uuid.UUID, retryable: bool, status_code: int) -> HTTPException:
@@ -127,6 +137,80 @@ def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: 
     candidates = repo.hydrate_candidates(chunk_ids, lexical_scores, vector_score_map)
     return candidates, lexical_ms
 
+def _safe_uuid(value: object) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_memory_boosting(
+    candidates: list[dict],
+    previous_trace_items: list[object],
+    max_boost: float = 0.12,
+) -> tuple[list[dict], int]:
+    boosts_by_key: dict[tuple[str, str], float] = {}
+    for rank, item in enumerate(previous_trace_items[:20]):
+        try:
+            if not bool(getattr(item, "used_in_answer", False)):
+                continue
+            doc_id = str(getattr(item, "document_id"))
+            chunk_id = str(getattr(item, "chunk_id"))
+            recency = max(0.3, 1.0 - (rank * 0.2))
+            boosts_by_key[(doc_id, chunk_id)] = max(boosts_by_key.get((doc_id, chunk_id), 0.0), max_boost * recency)
+        except Exception:  # noqa: BLE001
+            continue
+
+    boosted = 0
+    updated = []
+    for entry in candidates:
+        doc_id = str(entry.get("document_id"))
+        chunk_id = str(entry.get("chunk_id"))
+        boost = min(max_boost, boosts_by_key.get((doc_id, chunk_id), 0.0))
+        if boost > 0:
+            entry["final_score"] = float(entry.get("final_score", 0.0)) + boost
+            entry.setdefault("boosts_applied", []).append({"name": "memory_reuse_boost", "value": boost, "reason": "recent_answer_reuse"})
+            boosted += 1
+        updated.append(entry)
+
+    updated.sort(key=lambda x: float(x.get("final_score", 0.0)), reverse=True)
+    return updated, boosted
+
+
+def _build_retrieval_trace_rows(
+    conversation_id: uuid.UUID,
+    turn_id: uuid.UUID,
+    ranked_candidates: list[dict],
+    chosen_candidates: list[dict],
+) -> list[dict]:
+    chosen_ids = {str(c.get("chunk_id")) for c in chosen_candidates}
+    citation_ranks = {str(c.get("chunk_id")): idx + 1 for idx, c in enumerate(chosen_candidates)}
+    rows: list[dict] = []
+    for idx, candidate in enumerate(ranked_candidates, start=1):
+        doc_id = _safe_uuid(candidate.get("document_id"))
+        chunk_id = _safe_uuid(candidate.get("chunk_id"))
+        if doc_id is None or chunk_id is None:
+            continue
+        candidate_id = str(candidate.get("chunk_id"))
+        rows.append(
+            {
+                "conversation_id": conversation_id,
+                "turn_id": turn_id,
+                "document_id": doc_id,
+                "chunk_id": chunk_id,
+                "ordinal": idx,
+                "score_lex_raw": float(candidate.get("lex_raw", candidate.get("lex_score", 0.0))),
+                "score_vec_raw": float(candidate.get("vec_raw", candidate.get("vec_score", 0.0))),
+                "score_rerank_raw": float(candidate.get("rerank_raw", candidate.get("rerank_score", 0.0))),
+                "score_final": float(candidate.get("final_score", 0.0)),
+                "used_in_context": candidate_id in chosen_ids,
+                "used_in_answer": candidate_id in chosen_ids,
+                "citation_rank": citation_ranks.get(candidate_id),
+            }
+        )
+    return rows
+
+
 
 @router.get("/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
@@ -167,36 +251,186 @@ def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> JobStatusRespon
 
 
 @router.post("/v1/query", response_model=QueryResponse)
-def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
+def post_query(
+    payload: QueryRequest,
+    db: Session = Depends(get_db),
+    x_conversation_id: str | None = Header(default=None, alias="X-Conversation-Id"),
+    x_client_turn_id: str | None = Header(default=None, alias="X-Client-Turn-Id"),
+) -> QueryResponse:
     corr = uuid.uuid4()
     t_start = time.perf_counter()
     log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", payload.model_dump())
 
+    conversation_repo: ConversationRepository | None = None
+    conversation_id: uuid.UUID | None = None
+    user_turn_text = payload.query
+
+    if x_conversation_id:
+        try:
+            conversation_id = uuid.UUID(x_conversation_id)
+        except (ValueError, TypeError):
+            raise _error("B-CONV-ID-INVALID", "Invalid X-Conversation-Id header", corr, False, status.HTTP_400_BAD_REQUEST)
+
+    if settings.USE_CONVERSATION_MEMORY and conversation_id is not None:
+        conversation_repo = ConversationRepository(db, payload.tenant_id)
+        conversation = conversation_repo.get_conversation(conversation_id)
+        if conversation is None:
+            conversation = conversation_repo.create_conversation(conversation_id)
+        else:
+            ttl_cutoff = datetime.now(timezone.utc) - timedelta(minutes=settings.CONVERSATION_TTL_MINUTES)
+            last_active_at = conversation.last_active_at
+            if last_active_at is not None and last_active_at.tzinfo is None:
+                last_active_at = last_active_at.replace(tzinfo=timezone.utc)
+            if last_active_at and last_active_at < ttl_cutoff:
+                conversation_repo.mark_conversation_archived(conversation)
+            conversation_repo.touch_conversation(conversation)
+
+        user_turn_meta = {}
+        if x_client_turn_id:
+            user_turn_meta["client_turn_id"] = x_client_turn_id
+        if not user_turn_meta:
+            user_turn_meta = None
+        user_turn = conversation_repo.create_turn(conversation_id, "user", user_turn_text, meta=user_turn_meta)
+    else:
+        user_turn = None
+
+    if conversation_repo is not None and conversation_id is not None:
+        recent_turns_for_summary = [
+            {"role": t.role, "text": t.text, "turn_index": int(t.turn_index)}
+            for t in reversed(conversation_repo.list_turns(conversation_id, limit=max(settings.CONVERSATION_SUMMARY_THRESHOLD_TURNS + 5, 20)))
+        ]
+        if len(recent_turns_for_summary) >= settings.CONVERSATION_SUMMARY_THRESHOLD_TURNS:
+            latest_summary = conversation_repo.get_latest_summary(conversation_id)
+            max_turn_index = max([int(t.get("turn_index", 0)) for t in recent_turns_for_summary], default=0)
+            covered_index = int(latest_summary.covers_turn_index_to) if latest_summary is not None else 0
+            if max_turn_index > covered_index:
+                masked_mode = settings.LOG_DATA_MODE.strip().lower() == "masked"
+                summary_text_new = get_conversation_summarizer().summarize(recent_turns_for_summary, masked_mode=masked_mode)
+                conversation_repo.create_summary(
+                    conversation_id=conversation_id,
+                    summary_text=summary_text_new,
+                    covers_turn_index_to=max_turn_index,
+                )
+
+    resolved_query_text = payload.query
+    rewrite_result = None
+    clarification_enabled = bool(settings.USE_CLARIFICATION_LOOP and settings.USE_LLM_QUERY_REWRITE and settings.USE_CONVERSATION_MEMORY)
+    clarification_pending = False
+    last_clarification_question: str | None = None
+    if conversation_repo is not None and conversation_id is not None:
+        latest_resolution = conversation_repo.get_latest_query_resolution(conversation_id)
+        if latest_resolution is not None and bool(latest_resolution.needs_clarification):
+            clarification_pending = True
+            last_clarification_question = latest_resolution.clarification_question
+
+    if settings.USE_LLM_QUERY_REWRITE:
+        recent_turns: list[dict] = []
+        summary_text: str | None = None
+        if conversation_repo is not None and conversation_id is not None:
+            recent_turns = [
+                {"role": t.role, "text": t.text}
+                for t in reversed(conversation_repo.list_turns(conversation_id, limit=settings.CONVERSATION_TURNS_LAST_N))
+            ]
+            latest_summary = conversation_repo.get_latest_summary(conversation_id)
+            summary_text = latest_summary.summary_text if latest_summary else None
+        try:
+            log_event(
+                db,
+                str(payload.tenant_id),
+                str(corr),
+                "LLM_REQUEST",
+                {"model": settings.REWRITE_MODEL_ID, "keep_alive": settings.REWRITE_KEEP_ALIVE, "component": "query_rewriter"},
+            )
+            rewrite_result = get_query_rewriter().rewrite(
+                tenant_id=str(payload.tenant_id),
+                conversation_id=str(conversation_id) if conversation_id else None,
+                user_query=payload.query,
+                recent_turns=recent_turns,
+                summary=summary_text,
+                citation_hints=None,
+                clarification_pending=clarification_pending,
+                last_question=last_clarification_question,
+            )
+            resolved_query_text = rewrite_result.resolved_query_text
+            log_event(
+                db,
+                str(payload.tenant_id),
+                str(corr),
+                "LLM_RESPONSE",
+                {"model": settings.REWRITE_MODEL_ID, "keep_alive": settings.REWRITE_KEEP_ALIVE, "component": "query_rewriter", "confidence": rewrite_result.confidence},
+            )
+        except (QueryRewriteError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "B-REWRITE-FAILED", "message": str(exc)})
+            raise _error("B-REWRITE-FAILED", "Query rewrite failed", corr, True, status.HTTP_502_BAD_GATEWAY)
+
+        if conversation_repo is not None and conversation_id is not None and user_turn is not None:
+            conversation_repo.create_query_resolution(
+                conversation_id=conversation_id,
+                turn_id=user_turn.turn_id,
+                resolved_query_text=rewrite_result.resolved_query_text,
+                rewrite_strategy="llm_rewrite",
+                rewrite_inputs={
+                    "recent_turns_count": len(recent_turns),
+                    "has_summary": bool(summary_text),
+                    "rewrite_model_id": settings.REWRITE_MODEL_ID,
+                    "rewrite_keep_alive": settings.REWRITE_KEEP_ALIVE,
+                    "clarification_pending": clarification_pending,
+                    "last_question": last_clarification_question,
+                },
+                rewrite_confidence=rewrite_result.confidence,
+                topic_shift_detected=rewrite_result.topic_shift,
+                needs_clarification=rewrite_result.clarification_needed,
+                clarification_question=rewrite_result.clarification_question,
+            )
+
+        if clarification_enabled and conversation_repo is not None and conversation_id is not None and user_turn is not None:
+            clarification_streak = conversation_repo.count_recent_consecutive_clarifications(conversation_id)
+            should_ask = bool(rewrite_result and rewrite_result.clarification_needed and rewrite_result.confidence < settings.REWRITE_CONFIDENCE_THRESHOLD)
+            if should_ask and clarification_streak < 2:
+                clarification_text = (rewrite_result.clarification_question or "Please clarify your request.").strip()
+                conversation_repo.create_turn(conversation_id, "assistant", clarification_text, meta={"correlation_id": str(corr), "clarification": True})
+                t_total_ms = int((time.perf_counter() - t_start) * 1000)
+                trace = {"trace_id": str(corr), "scoring_trace": []}
+                log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
+                return QueryResponse(
+                    answer=clarification_text,
+                    only_sources_verdict="PASS",
+                    citations=[],
+                    correlation_id=corr,
+                    trace={"trace_id": corr, "scoring_trace": []},
+                )
+
     try:
-        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": payload.query, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
-        query_embedding = get_embeddings_client().embed_text(payload.query, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
+        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": resolved_query_text, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
+        query_embedding = get_embeddings_client().embed_text(resolved_query_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
         log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_RESPONSE", {"dimensions": len(query_embedding)})
     except Exception as exc:  # noqa: BLE001
         log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "EMBEDDINGS_HTTP_ERROR", "message": str(exc)})
         raise _error("EMBEDDINGS_HTTP_ERROR", "Embeddings service call failed", corr, True, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     t_parse0 = time.perf_counter()
-    candidates, lexical_ms = _fetch_candidates(db, str(payload.tenant_id), payload.query, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
+    candidates, lexical_ms = _fetch_candidates(db, str(payload.tenant_id), resolved_query_text, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
     t_parse_ms = int((time.perf_counter() - t_parse0) * 1000)
 
     ranked, timers = hybrid_rank(
-        payload.query,
+        resolved_query_text,
         candidates,
         query_embedding,
         normalize_scores=settings.HYBRID_SCORE_NORMALIZATION,
     )
-    reranked, t_rerank = get_reranker().rerank(payload.query, ranked)
+    reranked, t_rerank = get_reranker().rerank(resolved_query_text, ranked)
     ranked_final, _ = hybrid_rank(
-        payload.query,
+        resolved_query_text,
         reranked,
         query_embedding,
         normalize_scores=settings.HYBRID_SCORE_NORMALIZATION,
     )
+
+    boosted_chunks_count = 0
+    if conversation_repo is not None and conversation_id is not None and user_turn is not None:
+        previous_trace = conversation_repo.list_retrieval_trace_items(conversation_id, limit=50)
+        ranked_final, boosted_chunks_count = _apply_memory_boosting(ranked_final, previous_trace)
+
     tenant_safe_ranked = [c for c in ranked_final if c.get("tenant_id") == str(payload.tenant_id)]
     chosen = expand_neighbors(
         db,
@@ -302,6 +536,7 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
         "llm_prompt_tokens_est": llm_tokens_est,
         "llm_completion_tokens_est": llm_completion_tokens_est,
         **budget_log,
+        "boosted_chunks_count": boosted_chunks_count,
     }
     budgets = build_stage_budgets(settings.REQUEST_TIMEOUT_SECONDS, settings.EMBEDDINGS_TIMEOUT_SECONDS)
     exceeded = exceeded_budgets(perf, budgets)
@@ -312,8 +547,15 @@ def post_query(payload: QueryRequest, db: Session = Depends(get_db)) -> QueryRes
     trace["anti_hallucination"] = anti_payload
     trace["timing"] = perf
 
+    if conversation_repo is not None and conversation_id is not None and user_turn is not None:
+        trace_rows = _build_retrieval_trace_rows(conversation_id, user_turn.turn_id, tenant_safe_ranked, chosen)
+        conversation_repo.create_retrieval_trace_items(trace_rows)
+
     log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"stage": "FUSION_BOOST", "trace_id": trace["trace_id"], "scoring_trace": trace["scoring_trace"], "timing": perf})
     log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
+    if conversation_repo is not None and conversation_id is not None:
+        conversation_repo.create_turn(conversation_id, "assistant", answer, meta={"correlation_id": str(corr)})
+
     return QueryResponse(
         answer=answer,
         only_sources_verdict=only_sources,

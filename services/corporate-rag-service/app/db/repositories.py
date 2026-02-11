@@ -7,7 +7,18 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.models.models import Chunks, ChunkVectors, Documents, EventLogs, IngestJobs
+from app.models.models import (
+    Chunks,
+    ChunkVectors,
+    ConversationSummaries,
+    Conversations,
+    ConversationTurns,
+    Documents,
+    EventLogs,
+    IngestJobs,
+    QueryResolutions,
+    RetrievalTraceItems,
+)
 
 
 class TenantRepository:
@@ -249,3 +260,221 @@ class TenantRepository:
             "lex_score": float(lex_score),
             "vec_score": float(vec_score),
         }
+
+
+class ConversationRepository:
+    """Tenant-scoped conversation persistence helpers."""
+
+    def __init__(self, db: Session, tenant_id: str | uuid.UUID):
+        self.db = db
+        self.tenant_id = str(tenant_id)
+
+    def get_conversation(self, conversation_id: uuid.UUID) -> Conversations | None:
+        return (
+            self.db.query(Conversations)
+            .filter(Conversations.tenant_id == self.tenant_id)
+            .filter(Conversations.conversation_id == conversation_id)
+            .first()
+        )
+
+    def create_conversation(self, conversation_id: uuid.UUID, status: str = "active") -> Conversations:
+        conversation = Conversations(conversation_id=conversation_id, tenant_id=self.tenant_id, status=status)
+        self.db.add(conversation)
+        self.db.commit()
+        self.db.refresh(conversation)
+        return conversation
+
+    def mark_conversation_archived(self, conversation: Conversations) -> None:
+        conversation.status = "archived"
+        conversation.last_active_at = datetime.now(timezone.utc)
+        self.db.add(conversation)
+        self.db.commit()
+
+    def touch_conversation(self, conversation: Conversations) -> None:
+        conversation.last_active_at = datetime.now(timezone.utc)
+        self.db.add(conversation)
+        self.db.commit()
+
+    def get_next_turn_index(self, conversation_id: uuid.UUID) -> int:
+        turn = (
+            self.db.query(ConversationTurns)
+            .filter(ConversationTurns.tenant_id == self.tenant_id)
+            .filter(ConversationTurns.conversation_id == conversation_id)
+            .order_by(ConversationTurns.turn_index.desc())
+            .first()
+        )
+        if turn is None:
+            return 1
+        return int(turn.turn_index) + 1
+
+    def create_turn(
+        self,
+        conversation_id: uuid.UUID,
+        role: str,
+        text: str,
+        meta: dict | None = None,
+        turn_index: int | None = None,
+    ) -> ConversationTurns:
+        resolved_turn_index = turn_index if turn_index is not None else self.get_next_turn_index(conversation_id)
+        turn = ConversationTurns(
+            conversation_id=conversation_id,
+            tenant_id=self.tenant_id,
+            turn_index=resolved_turn_index,
+            role=role,
+            text=text,
+            meta=meta,
+        )
+        self.db.add(turn)
+        self.db.commit()
+        self.db.refresh(turn)
+        return turn
+
+    def create_query_resolution(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        turn_id: uuid.UUID,
+        resolved_query_text: str,
+        rewrite_strategy: str,
+        rewrite_inputs: dict | None,
+        rewrite_confidence: float | None,
+        topic_shift_detected: bool,
+        needs_clarification: bool,
+        clarification_question: str | None,
+    ) -> QueryResolutions:
+        resolution = QueryResolutions(
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            resolved_query_text=resolved_query_text,
+            rewrite_strategy=rewrite_strategy,
+            rewrite_inputs=rewrite_inputs,
+            rewrite_confidence=rewrite_confidence,
+            topic_shift_detected=topic_shift_detected,
+            needs_clarification=needs_clarification,
+            clarification_question=clarification_question,
+        )
+        self.db.add(resolution)
+        self.db.commit()
+        self.db.refresh(resolution)
+        return resolution
+
+    def create_retrieval_trace_items(self, items: list[dict]) -> int:
+        created = 0
+        for item in items:
+            trace_item = RetrievalTraceItems(
+                tenant_id=self.tenant_id,
+                conversation_id=item["conversation_id"],
+                turn_id=item["turn_id"],
+                document_id=item["document_id"],
+                chunk_id=item["chunk_id"],
+                ordinal=item["ordinal"],
+                score_lex_raw=item.get("score_lex_raw"),
+                score_vec_raw=item.get("score_vec_raw"),
+                score_rerank_raw=item.get("score_rerank_raw"),
+                score_final=item.get("score_final"),
+                used_in_context=bool(item.get("used_in_context", False)),
+                used_in_answer=bool(item.get("used_in_answer", False)),
+                citation_rank=item.get("citation_rank"),
+            )
+            self.db.add(trace_item)
+            created += 1
+        if created > 0:
+            self.db.commit()
+        return created
+
+    def list_turns(self, conversation_id: uuid.UUID, limit: int = 50) -> list[ConversationTurns]:
+        return (
+            self.db.query(ConversationTurns)
+            .filter(ConversationTurns.tenant_id == self.tenant_id)
+            .filter(ConversationTurns.conversation_id == conversation_id)
+            .order_by(ConversationTurns.turn_index.desc())
+            .limit(limit)
+            .all()
+        )
+
+    def get_latest_query_resolution(self, conversation_id: uuid.UUID) -> QueryResolutions | None:
+        return (
+            self.db.query(QueryResolutions)
+            .filter(QueryResolutions.tenant_id == self.tenant_id)
+            .filter(QueryResolutions.conversation_id == conversation_id)
+            .order_by(QueryResolutions.created_at.desc())
+            .first()
+        )
+
+    def count_recent_consecutive_clarifications(self, conversation_id: uuid.UUID, max_scan: int = 10) -> int:
+        rows = (
+            self.db.query(QueryResolutions)
+            .filter(QueryResolutions.tenant_id == self.tenant_id)
+            .filter(QueryResolutions.conversation_id == conversation_id)
+            .order_by(QueryResolutions.created_at.desc())
+            .limit(max_scan)
+            .all()
+        )
+        count = 0
+        for row in rows:
+            if bool(row.needs_clarification):
+                count += 1
+                continue
+            break
+        return count
+
+    def list_query_resolutions(self, conversation_id: uuid.UUID, limit: int = 50) -> list[QueryResolutions]:
+        return (
+            self.db.query(QueryResolutions)
+            .filter(QueryResolutions.tenant_id == self.tenant_id)
+            .filter(QueryResolutions.conversation_id == conversation_id)
+            .order_by(QueryResolutions.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+
+    def list_retrieval_trace_items(self, conversation_id: uuid.UUID, turn_id: uuid.UUID | None = None, limit: int = 100) -> list[RetrievalTraceItems]:
+        query = (
+            self.db.query(RetrievalTraceItems)
+            .filter(RetrievalTraceItems.tenant_id == self.tenant_id)
+            .filter(RetrievalTraceItems.conversation_id == conversation_id)
+        )
+        if turn_id is not None:
+            query = query.filter(RetrievalTraceItems.turn_id == turn_id)
+        return query.order_by(RetrievalTraceItems.created_at.desc()).limit(limit).all()
+
+    def get_latest_summary(self, conversation_id: uuid.UUID) -> ConversationSummaries | None:
+        return (
+            self.db.query(ConversationSummaries)
+            .filter(ConversationSummaries.tenant_id == self.tenant_id)
+            .filter(ConversationSummaries.conversation_id == conversation_id)
+            .order_by(ConversationSummaries.summary_version.desc())
+            .first()
+        )
+
+    def create_summary(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        summary_text: str,
+        covers_turn_index_to: int,
+    ) -> ConversationSummaries:
+        latest = self.get_latest_summary(conversation_id)
+        next_version = 1 if latest is None else int(latest.summary_version) + 1
+        summary = ConversationSummaries(
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            summary_version=next_version,
+            summary_text=summary_text,
+            covers_turn_index_to=covers_turn_index_to,
+        )
+        self.db.add(summary)
+        self.db.commit()
+        self.db.refresh(summary)
+        return summary
+
+    def list_summaries(self, conversation_id: uuid.UUID, limit: int = 20) -> list[ConversationSummaries]:
+        return (
+            self.db.query(ConversationSummaries)
+            .filter(ConversationSummaries.tenant_id == self.tenant_id)
+            .filter(ConversationSummaries.conversation_id == conversation_id)
+            .order_by(ConversationSummaries.summary_version.desc())
+            .limit(limit)
+            .all()
+        )

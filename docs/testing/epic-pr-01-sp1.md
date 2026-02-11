@@ -19,3 +19,8 @@ pytest -q
 ## SP2 bootstrap
 - Added `tools/drift_check.py` as CI-friendly `python -m tools.drift_check` command.
 - Added `tests/unit/test_drift_check.py` with PASS and simulated FAIL scenarios.
+
+- Extended `tools/drift_check.py` env extras allowlist for internal EPIC-08 runtime flags (conversation memory/query rewrite/clarification) to keep architecture-freeze drift checks stable without mutating frozen env contracts.
+- Added unit regressions for drift allowlist behavior:
+  - positive: all EPIC-08 env flags are covered by `tools/drift_check.py` allowlist;
+  - negative: unknown EPIC-08-like env key still surfaces as drift (`REWRITE_UNKNOWN_FLAG`).

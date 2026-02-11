@@ -66,7 +66,7 @@ class FakeQuery:
         return self
 
     def first(self):
-        return None
+        return self.rows[0] if self.rows else None
 
     def join(self, *_args, **_kwargs):
         return self
@@ -84,6 +84,10 @@ class FakeQuery:
 class FakeDB:
     def __init__(self, rows):
         self.rows = rows
+        self.added = []
+        self.conversation_turns = []
+        self.query_resolutions = []
+        self.conversation_summaries = []
 
     def execute(self, statement, *_args, **_kwargs):
         sql = str(statement)
@@ -97,6 +101,14 @@ class FakeDB:
         return FakeExecResult([])
 
     def add(self, _obj):
+        self.added.append(_obj)
+        name = _obj.__class__.__name__
+        if name == "ConversationTurns":
+            self.conversation_turns.append(_obj)
+        elif name == "QueryResolutions":
+            self.query_resolutions.append(_obj)
+        elif name == "ConversationSummaries":
+            self.conversation_summaries.append(_obj)
         return None
 
     def commit(self):
@@ -106,14 +118,24 @@ class FakeDB:
         return None
 
     def query(self, model):
-        if getattr(model, "__name__", "") == "IngestJobs":
+        name = getattr(model, "__name__", "")
+        if name == "IngestJobs":
             return FakeQuery([])
+        if name == "ConversationTurns":
+            return FakeQuery(self.conversation_turns)
+        if name == "QueryResolutions":
+            return FakeQuery(self.query_resolutions)
+        if name == "ConversationSummaries":
+            return FakeQuery(self.conversation_summaries)
         return FakeQuery(self.rows)
 
 
-def override_db_with_rows(rows):
+def override_db_with_rows(rows, holder=None):
     def _dep():
-        yield FakeDB(rows)
+        db = FakeDB(rows)
+        if holder is not None:
+            holder["db"] = db
+        yield db
 
     return _dep
 
@@ -378,3 +400,520 @@ def test_query_endpoint_passes_keep_alive_zero_to_llm(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["only_sources_verdict"] == "PASS"
+
+
+def test_query_with_invalid_conversation_header_returns_400(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "not-a-uuid"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "B-CONV-ID-INVALID"
+
+
+def test_query_stateless_mode_does_not_write_conversation_tables(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", False)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    added_names = {obj.__class__.__name__ for obj in holder["db"].added}
+    assert "Conversations" not in added_names
+    assert "ConversationTurns" not in added_names
+
+
+def test_query_memory_mode_persists_user_and_assistant_turns(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={
+            "X-Conversation-Id": "11111111-1111-1111-1111-111111111111",
+            "X-Client-Turn-Id": "22222222-2222-2222-2222-222222222222",
+        },
+    )
+
+    assert response.status_code == 200
+    added = holder["db"].added
+    added_names = [obj.__class__.__name__ for obj in added]
+    assert "Conversations" in added_names
+    turn_objects = [obj for obj in added if obj.__class__.__name__ == "ConversationTurns"]
+    assert len(turn_objects) == 2
+    assert turn_objects[0].role == "user"
+    assert turn_objects[1].role == "assistant"
+
+
+def test_query_rewrite_flag_on_uses_resolved_query_for_embeddings(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def __init__(self):
+            self.queries = []
+
+        def embed_text(self, query, *_args, **_kwargs):
+            self.queries.append(query)
+            return [0.8, 0.2]
+
+    emb = FakeEmbeddingsClient()
+
+    class FakeRewriteResult:
+        resolved_query_text = "resolved vacation policy"
+        confidence = 0.88
+        topic_shift = False
+        clarification_needed = False
+        clarification_question = None
+
+    class FakeRewriter:
+        def rewrite(self, **_kwargs):
+            return FakeRewriteResult()
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: emb)
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "vacation?", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert emb.queries[0] == "resolved vacation policy"
+    added_names = [obj.__class__.__name__ for obj in holder["db"].added]
+    assert "QueryResolutions" in added_names
+
+
+def test_query_rewrite_failure_returns_502(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FailingRewriter:
+        def rewrite(self, **_kwargs):
+            raise ValueError("bad rewrite")
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FailingRewriter())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["error"]["code"] == "B-REWRITE-FAILED"
+
+
+def test_memory_boosting_increases_rank_for_recent_answer_chunk():
+    from app.api import routes
+
+    class Prev:
+        used_in_answer = True
+        document_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        chunk_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    candidates = [
+        {"document_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "chunk_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "final_score": 0.2},
+        {"document_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "chunk_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "final_score": 0.25},
+    ]
+
+    boosted, boosted_count = routes._apply_memory_boosting(candidates, [Prev()], max_boost=0.12)
+
+    assert boosted_count == 1
+    assert boosted[0]["chunk_id"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def test_memory_boosting_respects_cap():
+    from app.api import routes
+
+    class Prev:
+        used_in_answer = True
+        document_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        chunk_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    candidates = [
+        {"document_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "chunk_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "final_score": 0.9},
+    ]
+
+    boosted, _ = routes._apply_memory_boosting(candidates, [Prev(), Prev(), Prev()], max_boost=0.05)
+
+    boost_values = [b["value"] for b in boosted[0].get("boosts_applied", []) if b.get("name") == "memory_reuse_boost"]
+    assert boost_values
+    assert max(boost_values) <= 0.05
+
+
+def test_clarification_turn_returns_question_without_retrieval(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
+    monkeypatch.setattr(routes.settings, "REWRITE_CONFIDENCE_THRESHOLD", 0.55)
+
+    class ClarifyDB(FakeDB):
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("retrieval should not run during clarification turn")
+
+    class FakeRewriteResult:
+        resolved_query_text = "ambiguous request"
+        confidence = 0.2
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Do you mean paid vacation policy or unpaid leave policy?"
+
+    class FakeRewriter:
+        def rewrite(self, **_kwargs):
+            return FakeRewriteResult()
+
+    holder = {}
+
+    def _dep():
+        db = ClarifyDB([])
+        holder["db"] = db
+        yield db
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "leave", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert "Do you mean" in response.json()["answer"]
+    names = [obj.__class__.__name__ for obj in holder["db"].added]
+    assert "QueryResolutions" in names
+    assert "ConversationTurns" in names
+
+
+def test_clarification_followup_disables_new_question_after_two_streak(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeRewriteResult:
+        resolved_query_text = "resolved policy"
+        confidence = 0.1
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Need more details?"
+
+    class FakeRewriter:
+        def rewrite(self, **kwargs):
+            assert kwargs.get("clarification_pending") is True
+            return FakeRewriteResult()
+
+    class ClarifyStreakDB(FakeDB):
+        def query(self, model):
+            name = getattr(model, "__name__", "")
+            if name == "QueryResolutions":
+                q = FakeQuery([type("R", (), {"needs_clarification": True, "clarification_question": "q1"})(), type("R", (), {"needs_clarification": True, "clarification_question": "q2"})()])
+                q.first = lambda: type("R", (), {"needs_clarification": True, "clarification_question": "q2"})()
+                return q
+            return super().query(model)
+
+    def _dep():
+        yield ClarifyStreakDB(rows)
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "it", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "context"
+
+
+def test_summary_created_after_threshold(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 1)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class FakeSummarizer:
+        def summarize(self, *_args, **_kwargs):
+            return "Conversation summary for rewriting"
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_conversation_summarizer", lambda: FakeSummarizer())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    names = [obj.__class__.__name__ for obj in holder["db"].added]
+    assert "ConversationSummaries" in names
+
+
+def test_summary_masked_mode_does_not_store_quotes(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 1)
+    monkeypatch.setattr(routes.settings, "LOG_DATA_MODE", "MASKED")
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "secret is 12345", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    summaries = [obj for obj in holder["db"].added if obj.__class__.__name__ == "ConversationSummaries"]
+    assert summaries
+    assert "\"" not in summaries[-1].summary_text
+    assert "12345" not in summaries[-1].summary_text
+
+
+def test_rewriter_receives_latest_summary_when_present(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    captured = {}
+
+    class FakeRewriteResult:
+        resolved_query_text = "resolved"
+        confidence = 0.9
+        topic_shift = False
+        clarification_needed = False
+        clarification_question = None
+
+    class FakeRewriter:
+        def rewrite(self, **kwargs):
+            captured["summary"] = kwargs.get("summary")
+            return FakeRewriteResult()
+
+    class SummaryAwareDB(FakeDB):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.conversation_summaries = [
+                type(
+                    "S",
+                    (),
+                    {
+                        "summary_text": "Existing conversation summary",
+                        "summary_version": 1,
+                        "covers_turn_index_to": 2,
+                    },
+                )()
+            ]
+
+    def _dep():
+        yield SummaryAwareDB(rows)
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert captured["summary"] == "Existing conversation summary"
+
+
+def test_clarification_signal_ignored_when_loop_flag_disabled(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", False)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeRewriteResult:
+        resolved_query_text = "resolved"
+        confidence = 0.1
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Need clarification?"
+
+    class FakeRewriter:
+        def rewrite(self, **_kwargs):
+            return FakeRewriteResult()
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "context"
+
+
+def test_summary_not_created_below_threshold(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 50)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    holder = {}
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows, holder=holder)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    summaries = [obj for obj in holder["db"].added if obj.__class__.__name__ == "ConversationSummaries"]
+    assert summaries == []
