@@ -28,3 +28,7 @@
 - `USE_LLM_GENERATION` (default: `false`) — keeps retrieval-only answer construction by default; when true calls LLM generation mode with `keep_alive=0`.
 - `CHUNK_TARGET_TOKENS` (`650`), `CHUNK_MAX_TOKENS` (`900`), `CHUNK_MIN_TOKENS` (`120`), `CHUNK_OVERLAP_TOKENS` (`80`) — chunking parameters aligned with `chunking_spec_v1.md`.
 
+
+## UI Conversational Layer
+
+Detailed implementation notes for Telegram and Web conversational UI layer are documented in `docs/implementation/ui_conversational_layer_v1.md`.
