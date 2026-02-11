@@ -1,3 +1,11 @@
+"""Ingestion pipeline for crawler-provided markdown sources.
+
+Current contract: runtime ingestion accepts markdown text produced by crawlers
+(e.g., Confluence/FileCatalog adapters). Byte upload conversion is intentionally
+not implemented; see ``FileByteIngestor`` protocol and ``StubFileByteIngestor``
+for the future extension point.
+"""
+
 import hashlib
 import json
 import logging
@@ -44,6 +52,24 @@ class FileCatalogCrawler(Protocol):
 class StorageAdapter(Protocol):
     def put_text(self, bucket: str, key: str, text: str) -> str:
         ...
+
+
+class FileByteIngestor(Protocol):
+    """Future extension point for byte-level file ingestion.
+
+    Runtime ingestion currently accepts markdown emitted by crawler adapters only.
+    This protocol and stub are intentionally not wired into runtime yet.
+    """
+
+    def ingest_bytes(self, tenant_id: uuid.UUID, source_ref: str, payload: bytes) -> SourceItem:
+        ...
+
+
+class StubFileByteIngestor:
+    """Stub implementation reserved for future file-byte conversion pipeline."""
+
+    def ingest_bytes(self, tenant_id: uuid.UUID, source_ref: str, payload: bytes) -> SourceItem:
+        raise NotImplementedError("Byte upload ingestion is not enabled; ingestion accepts markdown from crawlers.")
 
 
 class NoopConfluenceCrawler:
@@ -107,7 +133,35 @@ def _default_storage() -> ObjectStorage:
 
 def normalize_to_markdown(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    return re.sub(r"[ \t]+", " ", normalized)
+    lines = normalized.split("\n")
+    out_lines: list[str] = []
+    in_code_block = False
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            out_lines.append(line)
+            in_code_block = not in_code_block
+            continue
+
+        if in_code_block:
+            out_lines.append(line)
+            continue
+
+        if not line:
+            out_lines.append(line)
+            continue
+
+        match = re.match(r"^[ \t]*", line)
+        leading = match.group(0) if match else ""
+        body = line[len(leading) :]
+        if "|" in body and body.count("|") >= 2:
+            out_lines.append(f"{leading}{body.rstrip()}")
+            continue
+
+        normalized_body = re.sub(r"[ \t]+", " ", body).rstrip()
+        out_lines.append(f"{leading}{normalized_body}")
+
+    return "\n".join(out_lines)
 
 
 
@@ -353,20 +407,89 @@ def stable_chunk_id(tenant_id: uuid.UUID, document_id: uuid.UUID, source_version
 
 
 def _upsert_source(db: Session, tenant_id: uuid.UUID, item: SourceItem) -> uuid.UUID:
+    existing = db.execute(
+        _sql(
+            """
+            SELECT source_id
+            FROM sources
+            WHERE tenant_id = :tenant_id
+              AND source_type = :source_type
+              AND external_ref = :external_ref
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "source_type": item.source_type, "external_ref": item.external_ref},
+    )
+    if hasattr(existing, "mappings"):
+        row = existing.mappings().first()
+        if row and row.get("source_id"):
+            return row["source_id"]
+
     source_id = uuid.uuid4()
     db.execute(
         _sql(
             """
             INSERT INTO sources (source_id, tenant_id, source_type, external_ref, status)
             VALUES (:source_id, :tenant_id, :source_type, :external_ref, 'INDEXED')
+            ON CONFLICT (tenant_id, source_type, external_ref)
+            DO UPDATE SET status = 'INDEXED'
             """
         ),
         {"source_id": source_id, "tenant_id": tenant_id, "source_type": item.source_type, "external_ref": item.external_ref},
     )
+
+    check = db.execute(
+        _sql(
+            """
+            SELECT source_id
+            FROM sources
+            WHERE tenant_id = :tenant_id
+              AND source_type = :source_type
+              AND external_ref = :external_ref
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "source_type": item.source_type, "external_ref": item.external_ref},
+    )
+    if hasattr(check, "mappings"):
+        row = check.mappings().first()
+        if row and row.get("source_id"):
+            return row["source_id"]
     return source_id
 
 
-def _insert_source_version(db: Session, source_id: uuid.UUID, checksum: str, s3_raw_uri: str, s3_markdown_uri: str) -> uuid.UUID:
+def _find_source_version_id(db: Session, source_id: uuid.UUID, checksum: str) -> uuid.UUID | None:
+    existing = db.execute(
+        _sql(
+            """
+            SELECT source_version_id
+            FROM source_versions
+            WHERE source_id = :source_id
+              AND checksum = :checksum
+            LIMIT 1
+            """
+        ),
+        {"source_id": source_id, "checksum": checksum},
+    )
+    if not hasattr(existing, "mappings"):
+        return None
+    row = existing.mappings().first()
+    if not row:
+        return None
+    return row.get("source_version_id")
+
+
+def _insert_source_version(
+    db: Session,
+    source_id: uuid.UUID,
+    checksum: str,
+    s3_raw_uri: str,
+    s3_markdown_uri: str,
+) -> tuple[uuid.UUID, bool]:
+    existing_version_id = _find_source_version_id(db, source_id, checksum)
+    if existing_version_id is not None:
+        return existing_version_id, False
+
     source_version_id = uuid.uuid4()
     db.execute(
         _sql(
@@ -386,7 +509,45 @@ def _insert_source_version(db: Session, source_id: uuid.UUID, checksum: str, s3_
             "metadata_json": {"normalized": True},
         },
     )
-    return source_version_id
+    return source_version_id, True
+
+
+def _get_existing_document_id(db: Session, source_version_id: uuid.UUID) -> uuid.UUID | None:
+    result = db.execute(
+        _sql(
+            """
+            SELECT document_id
+            FROM documents
+            WHERE source_version_id = :source_version_id
+            ORDER BY updated_date DESC NULLS LAST
+            LIMIT 1
+            """
+        ),
+        {"source_version_id": source_version_id},
+    )
+    if not hasattr(result, "mappings"):
+        return None
+    row = result.mappings().first()
+    if not row:
+        return None
+    return row.get("document_id")
+
+
+def _list_existing_chunk_ids(db: Session, document_id: uuid.UUID) -> list[uuid.UUID]:
+    result = db.execute(
+        _sql(
+            """
+            SELECT chunk_id
+            FROM chunks
+            WHERE document_id = :document_id
+            ORDER BY ordinal
+            """
+        ),
+        {"document_id": document_id},
+    )
+    if not hasattr(result, "mappings"):
+        return []
+    return [row["chunk_id"] for row in result.mappings().all()]
 
 
 def _insert_document(db: Session, tenant_id: uuid.UUID, source_id: uuid.UUID, source_version_id: uuid.UUID, item: SourceItem) -> uuid.UUID:
@@ -692,33 +853,42 @@ def ingest_sources_sync(
         raw_key = f"{tenant_id}/{source_id}/raw.txt"
         md_key = f"{tenant_id}/{source_id}/normalized.md"
         cfg = _load_settings()
-        raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
-        md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
 
         checksum = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-        source_version_id = _insert_source_version(db, source_id, checksum, raw_uri, md_uri)
-        document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
-        chunk_ids = _insert_chunks(db, tenant_id, document_id, source_version_id, markdown)
+        source_version_id = _find_source_version_id(db, source_id, checksum)
+        if source_version_id is None:
+            raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
+            md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
+            source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri)
+        else:
+            created_source_version = False
+        document_id = _get_existing_document_id(db, source_version_id)
+
+        if created_source_version or document_id is None:
+            document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
+            chunk_ids = _insert_chunks(db, tenant_id, document_id, source_version_id, markdown)
+            links_found = extract_links(markdown)
+            links += _insert_links(db, document_id, links_found)
+
+            artifact_key = f"{tenant_id}/{source_id}/artifacts/ingestion.json"
+            artifact = {
+                "source_id": str(source_id),
+                "source_version_id": str(source_version_id),
+                "document_id": str(document_id),
+                "chunks": [str(c) for c in chunk_ids],
+                "links": links_found,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            storage.put_text(cfg.S3_BUCKET_MARKDOWN, artifact_key, json.dumps(artifact, ensure_ascii=False))
+            artifacts += 1
+
+            docs += 1
+            chunks += len(chunk_ids)
+        else:
+            chunk_ids = _list_existing_chunk_ids(db, document_id)
+
         _upsert_chunk_vectors(db, tenant_id, chunk_ids)
         _upsert_fts_for_chunks(db, tenant_id, chunk_ids)
-
-        links_found = extract_links(markdown)
-        links += _insert_links(db, document_id, links_found)
-
-        artifact_key = f"{tenant_id}/{source_id}/artifacts/ingestion.json"
-        artifact = {
-            "source_id": str(source_id),
-            "source_version_id": str(source_version_id),
-            "document_id": str(document_id),
-            "chunks": [str(c) for c in chunk_ids],
-            "links": links_found,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        storage.put_text(cfg.S3_BUCKET_MARKDOWN, artifact_key, json.dumps(artifact, ensure_ascii=False))
-        artifacts += 1
-
-        docs += 1
-        chunks += len(chunk_ids)
 
     if hasattr(db, "commit"):
         db.commit()
