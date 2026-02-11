@@ -54,8 +54,8 @@ class FakeDb:
             return FakeResult([] if source_id is None else [{"source_id": source_id}])
         if "INSERT INTO sources" in stmt:
             key = (payload.get("tenant_id"), payload.get("source_type"), payload.get("external_ref"))
-            self.sources.setdefault(key, payload.get("source_id"))
-            return FakeResult()
+            source_id = self.sources.setdefault(key, payload.get("source_id"))
+            return FakeResult([{"source_id": source_id}]) if "RETURNING source_id" in stmt else FakeResult()
 
         if "SELECT source_version_id" in stmt and "FROM source_versions" in stmt:
             key = (payload.get("source_id"), payload.get("checksum"))
@@ -63,8 +63,11 @@ class FakeDb:
             return FakeResult([] if version_id is None else [{"source_version_id": version_id}])
         if "INSERT INTO source_versions" in stmt:
             key = (payload.get("source_id"), payload.get("checksum"))
-            self.source_versions.setdefault(key, payload.get("source_version_id"))
-            return FakeResult()
+            existing = self.source_versions.get(key)
+            if existing is not None:
+                return FakeResult([])
+            self.source_versions[key] = payload.get("source_version_id")
+            return FakeResult([{"source_version_id": payload.get("source_version_id")}]) if "RETURNING source_version_id" in stmt else FakeResult()
 
         if "SELECT document_id" in stmt and "FROM documents" in stmt and "source_version_id" in stmt:
             version_id = payload.get("source_version_id")
@@ -219,7 +222,7 @@ def test_ingest_sources_sync_repeated_run_is_idempotent_for_sources_versions_doc
     source_version_calls = [sql for sql, _ in db.calls if "INSERT INTO source_versions" in sql]
     document_calls = [sql for sql, _ in db.calls if "INSERT INTO documents" in sql]
     chunk_calls = [sql for sql, _ in db.calls if "INSERT INTO chunks" in sql]
-    assert len(source_insert_calls) == 1
+    assert len(source_insert_calls) == 2
     assert len(source_version_calls) == 1
     assert len(document_calls) == 1
     assert len(chunk_calls) == first["chunks"]
@@ -238,6 +241,19 @@ def test_insert_source_version_returns_existing_for_same_checksum():
     assert first_created is True
     assert second_created is False
     assert first_id == second_id
+
+
+def test_upsert_source_returns_same_id_on_duplicate_positive():
+    from app.services.ingestion import _upsert_source
+
+    db = FakeDb()
+    tenant_id = uuid.uuid4()
+    item = SourceItem(source_type="CONFLUENCE_PAGE", external_ref="page:1", title="T", markdown="# T")
+
+    first = _upsert_source(db, tenant_id, item)
+    second = _upsert_source(db, tenant_id, item)
+
+    assert first == second
 
 
 def test_upsert_chunk_vectors_retries_then_succeeds(monkeypatch):
@@ -359,6 +375,38 @@ def test_parse_markdown_blocks_detects_markdown_table_positive():
     assert blocks[0]["type"] == "table"
 
 
+
+
+def test_parse_markdown_blocks_pipe_lines_without_separator_not_table_negative():
+    markdown = """a | b | c
+1 | 2 | 3
+"""
+    blocks = _parse_markdown_blocks(markdown)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "paragraph"
+
+
+def test_parse_markdown_blocks_separator_not_after_header_not_table_negative():
+    markdown = """a | b | c
+plain line
+| --- | --- |
+"""
+    blocks = _parse_markdown_blocks(markdown)
+    assert all(block["type"] != "table" for block in blocks)
+
+
+def test_parse_markdown_blocks_heading_path_nested_positive():
+    markdown = """# H1
+
+## H2
+
+### H3
+
+body
+"""
+    blocks = _parse_markdown_blocks(markdown)
+    assert blocks[0]["headings_path"] == ["H1", "H2", "H3"]
+
 def test_chunk_markdown_split_large_code_block_preserves_fence_positive():
     markdown = "# H1\n\n```python\n" + "\n".join(f"print({i})" for i in range(120)) + "\n```\n"
     chunks = chunk_markdown(markdown, target_tokens=20, max_tokens=25, min_tokens=1, overlap_tokens=5)
@@ -378,6 +426,19 @@ def test_chunk_markdown_split_table_only_by_lines_positive():
         assert "\n|" in c["chunk_text"] or c["chunk_text"].startswith("|")
 
 
+
+
+def test_chunk_markdown_split_table_keeps_header_with_separator_positive():
+    table = """| h1 | h2 |
+| --- | --- |
+""" + "".join(f"| {i} | {i+1} |\n" for i in range(40))
+    chunks = chunk_markdown(table, target_tokens=5, max_tokens=5, min_tokens=1, overlap_tokens=0)
+    table_chunks = [c for c in chunks if c["chunk_type"] == "table"]
+    assert table_chunks
+    assert "| h1 | h2 |" in table_chunks[0]["chunk_text"]
+    assert "| --- | --- |" in table_chunks[0]["chunk_text"]
+
+
 def test_chunk_markdown_split_list_not_mid_item_positive():
     markdown = "\n".join(f"- item {i} with extra words" for i in range(80)) + "\n"
     chunks = chunk_markdown(markdown, target_tokens=20, max_tokens=25, min_tokens=1, overlap_tokens=5)
@@ -391,7 +452,7 @@ def test_chunk_markdown_char_offsets_extract_real_substring_positive():
     chunks = chunk_markdown(markdown, target_tokens=10, max_tokens=12, min_tokens=1, overlap_tokens=2)
     for chunk in chunks:
         extracted = markdown[chunk["char_start"] : chunk["char_end"]]
-        assert chunk["chunk_text"].strip() in extracted
+        assert chunk["chunk_text"] == extracted
 
 
 def test_token_estimator_split_mode_backward_compatible_positive(monkeypatch):

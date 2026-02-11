@@ -133,7 +133,7 @@ def _default_storage() -> ObjectStorage:
     )
 
 
-def normalize_to_markdown(content: str) -> str:
+def normalize_to_markdown(content: str, *, normalize_inline_whitespace: bool = True) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")
     out_lines: list[str] = []
@@ -160,7 +160,7 @@ def normalize_to_markdown(content: str) -> str:
             out_lines.append(f"{leading}{body.rstrip()}")
             continue
 
-        normalized_body = re.sub(r"[ \t]+", " ", body).rstrip()
+        normalized_body = re.sub(r"[ \t]+", " ", body).rstrip() if normalize_inline_whitespace else body.rstrip()
         out_lines.append(f"{leading}{normalized_body}")
 
     return "\n".join(out_lines)
@@ -193,6 +193,18 @@ def _is_table_separator_line(line: str) -> bool:
 def _is_pipe_heavy_line(line: str) -> bool:
     stripped = line.strip()
     return stripped.count("|") >= 2
+
+
+def _is_table_header_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith("```"):
+        return False
+    if stripped.count("|") < 2:
+        return False
+    parts = [part.strip() for part in stripped.strip("|").split("|")]
+    if not parts or not any(parts):
+        return False
+    return not _is_table_separator_line(line)
 
 
 def _line_type(line: str, in_code_block: bool) -> str:
@@ -278,7 +290,7 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
 
         if line_t == "heading":
             flush(line_start)
-            stripped = line.lstrip()
+            stripped = line.lstrip().rstrip("\r\n")
             heading_level = len(stripped) - len(stripped.lstrip("#"))
             heading_title = stripped[heading_level:].strip()
             headings_path[:] = headings_path[: max(heading_level - 1, 0)]
@@ -286,14 +298,12 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
             i += 1
             continue
 
-        if not in_code_block and _is_pipe_heavy_line(line):
-            j = i
-            has_separator = False
+        if not in_code_block and (i + 1) < len(lines) and _is_table_header_line(line) and _is_table_separator_line(lines[i + 1]):
+            j = i + 2
             while j < len(lines) and _is_pipe_heavy_line(lines[j]) and not lines[j].strip().startswith("```"):
-                has_separator = has_separator or _is_table_separator_line(lines[j])
                 j += 1
 
-            if j - i >= 2 and has_separator:
+            if j - i >= 2:
                 flush(line_start)
                 current_type = "table"
                 current_start = line_start
@@ -379,12 +389,18 @@ def _split_large_block(
             line_offsets.append(running)
             running += len(raw_line)
 
+        protected_idxs: set[int] = set()
+        if block_type == "table" and len(lines) >= 2 and _is_table_header_line(lines[0]) and _is_table_separator_line(lines[1]):
+            protected_idxs = {0, 1}
+
         buf: list[str] = []
         buf_start = 0
         buf_tokens = 0
         for idx, line in enumerate(lines):
             line_tokens = _token_count(line)
-            if buf and buf_tokens + line_tokens > max_tokens:
+            would_overflow = bool(buf) and (buf_tokens + line_tokens > max_tokens)
+            should_keep_with_buffer = idx in protected_idxs and any(p in protected_idxs for p in range(buf_start, idx + 1))
+            if would_overflow and not should_keep_with_buffer:
                 piece = "".join(buf)
                 rel_start = line_offsets[buf_start]
                 rel_end = line_offsets[idx]
@@ -533,36 +549,23 @@ def stable_chunk_id(tenant_id: uuid.UUID, document_id: uuid.UUID, source_version
 
 
 def _upsert_source(db: Session, tenant_id: uuid.UUID, item: SourceItem) -> uuid.UUID:
-    existing = db.execute(
-        _sql(
-            """
-            SELECT source_id
-            FROM sources
-            WHERE tenant_id = :tenant_id
-              AND source_type = :source_type
-              AND external_ref = :external_ref
-            LIMIT 1
-            """
-        ),
-        {"tenant_id": tenant_id, "source_type": item.source_type, "external_ref": item.external_ref},
-    )
-    if hasattr(existing, "mappings"):
-        row = existing.mappings().first()
-        if row and row.get("source_id"):
-            return row["source_id"]
-
     source_id = uuid.uuid4()
-    db.execute(
+    result = db.execute(
         _sql(
             """
             INSERT INTO sources (source_id, tenant_id, source_type, external_ref, status)
             VALUES (:source_id, :tenant_id, :source_type, :external_ref, 'INDEXED')
             ON CONFLICT (tenant_id, source_type, external_ref)
             DO UPDATE SET status = 'INDEXED'
+            RETURNING source_id
             """
         ),
         {"source_id": source_id, "tenant_id": tenant_id, "source_type": item.source_type, "external_ref": item.external_ref},
     )
+    if hasattr(result, "mappings"):
+        row = result.mappings().first()
+        if row and row.get("source_id"):
+            return row["source_id"]
 
     check = db.execute(
         _sql(
@@ -617,12 +620,14 @@ def _insert_source_version(
         return existing_version_id, False
 
     source_version_id = uuid.uuid4()
-    db.execute(
+    insert_result = db.execute(
         _sql(
             """
             INSERT INTO source_versions (
                 source_version_id, source_id, version_label, checksum, s3_raw_uri, s3_markdown_uri, metadata_json
             ) VALUES (:source_version_id, :source_id, :version_label, :checksum, :s3_raw_uri, :s3_markdown_uri, :metadata_json)
+            ON CONFLICT (source_id, checksum) DO NOTHING
+            RETURNING source_version_id
             """
         ),
         {
@@ -635,6 +640,14 @@ def _insert_source_version(
             "metadata_json": {"normalized": True},
         },
     )
+    if hasattr(insert_result, "mappings"):
+        row = insert_result.mappings().first()
+        if row and row.get("source_version_id"):
+            return row["source_version_id"], True
+
+    existing_version_id = _find_source_version_id(db, source_id, checksum)
+    if existing_version_id is not None:
+        return existing_version_id, False
     return source_version_id, True
 
 
