@@ -1,0 +1,163 @@
+openapi: 3.0.3
+info:
+  title: Embeddings Service API
+  version: 1.0.0
+servers:
+  - url: http://localhost:{port}
+    variables:
+      port:
+        default: '8200'
+tags:
+  - name: health
+  - name: embeddings
+paths:
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getEmbeddingsHealth
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /v1/embeddings:
+    post:
+      tags: [embeddings]
+      summary: Generate embeddings for a batch of texts
+      operationId: createEmbeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmbeddingsRequest'
+      responses:
+        '200':
+          description: Embeddings generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmbeddingsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: embeddings-service
+        version:
+          type: string
+    EmbeddingsRequest:
+      type: object
+      required: [model, input]
+      properties:
+        model:
+          type: string
+          example: bge-m3
+        input:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            type: string
+        encoding_format:
+          type: string
+          enum: [float]
+          default: float
+        tenant_id:
+          type: string
+          format: uuid
+        correlation_id:
+          type: string
+          format: uuid
+    EmbeddingData:
+      type: object
+      required: [index, embedding]
+      properties:
+        index:
+          type: integer
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+    EmbeddingsUsage:
+      type: object
+      required: [input_texts, total_tokens_estimate]
+      properties:
+        input_texts:
+          type: integer
+        total_tokens_estimate:
+          type: integer
+    EmbeddingsResponse:
+      type: object
+      required: [object, model, data, usage]
+      properties:
+        object:
+          type: string
+          enum: [list]
+        model:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmbeddingData'
+        usage:
+          $ref: '#/components/schemas/EmbeddingsUsage'
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, correlation_id, retryable, timestamp]
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR, RATE_LIMITED, INTERNAL_ERROR]
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+            correlation_id:
+              type: string
+              format: uuid
+            retryable:
+              type: boolean
+            timestamp:
+              type: string
+              format: date-time
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimitedError:
+      description: Rate limited
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
