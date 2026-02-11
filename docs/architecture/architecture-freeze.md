@@ -233,7 +233,7 @@ Enum freeze marker: `ENUM_FREEZE_V1`.
 - `citations_mode`: `DISABLED`, `OPTIONAL`, `REQUIRED`
 - `only_sources_mode`: `STRICT`
 - `job_type`: `SYNC_CONFLUENCE`, `SYNC_FILE_CATALOG`, `PREPROCESS`, `INDEX_LEXICAL`, `INDEX_VECTOR`, `REINDEX_ALL`
-- `job_status`: `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, `PARTIAL_SUCCESS`
+- `job_status`: `queued`, `processing`, `retrying`, `done`, `error`, `canceled`, `expired`
 - `link_type`: `CONFLUENCE_PAGE_LINK`, `EXTERNAL_URL`, `ATTACHMENT_LINK`
 - `pipeline_stage`: `INGEST_DISCOVERY`, `INGEST_FETCH`, `NORMALIZE_MARKDOWN`, `STRUCTURE_PARSE`, `CHUNK_LOGICAL`, `INDEX_BM25`, `EMBED_REQUEST`, `INDEX_VECTOR`, `SEARCH_LEXICAL`, `SEARCH_VECTOR`, `FUSION_BOOST`, `RERANK`, `ANSWER_COMPOSE`, `ANSWER_VALIDATE_ONLY_SOURCES`
 - `pipeline_stage_status`: `STARTED`, `COMPLETED`, `FAILED`, `SKIPPED`
@@ -288,12 +288,14 @@ No simplifications introduced.
 
 ### Job status model
 - Lifecycle graph:
-  - `QUEUED -> RUNNING -> SUCCEEDED`
-  - `QUEUED -> RUNNING -> PARTIAL_SUCCESS`
-  - `QUEUED -> RUNNING -> FAILED`
-  - `QUEUED -> CANCELLED`
-  - `RUNNING -> CANCELLED`
-- Terminal states: `SUCCEEDED`, `PARTIAL_SUCCESS`, `FAILED`, `CANCELLED`.
+  - `queued -> processing -> done`
+  - `queued -> processing -> retrying -> processing -> done`
+  - `queued -> processing -> retrying -> processing -> error`
+  - `queued -> canceled`
+  - `queued -> expired`
+  - `processing -> canceled`
+  - `processing -> expired`
+- Terminal states: `done`, `error`, `canceled`, `expired`.
 - Each terminal transition must write `finished_at`; failure states require `error_code`.
 
 ### Invariants check after SP-A5
@@ -432,12 +434,13 @@ LIST_ENUMS:
     - INDEX_VECTOR
     - REINDEX_ALL
 - job_status:
-    - QUEUED
-    - RUNNING
-    - SUCCEEDED
-    - FAILED
-    - CANCELLED
-    - PARTIAL_SUCCESS
+    - queued
+    - processing
+    - retrying
+    - done
+    - error
+    - canceled
+    - expired
 - link_type:
     - CONFLUENCE_PAGE_LINK
     - EXTERNAL_URL
@@ -735,3 +738,4 @@ LIST_ERROR_CODES:
 - VALIDATION_ERROR
 - RATE_LIMITED
 - INTERNAL_ERROR
+ARCHITECTURE FROZEN

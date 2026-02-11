@@ -222,7 +222,7 @@ components:
           format: uuid
         job_status:
           type: string
-          enum: [QUEUED]
+          enum: [queued, processing, retrying, done, error, canceled, expired]
     JobStatusResponse:
       type: object
       required: [job_id, tenant_id, job_type, job_status, requested_by, started_at]
@@ -238,7 +238,7 @@ components:
           enum: [SYNC_CONFLUENCE, SYNC_FILE_CATALOG, PREPROCESS, INDEX_LEXICAL, INDEX_VECTOR, REINDEX_ALL]
         job_status:
           type: string
-          enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, PARTIAL_SUCCESS]
+          enum: [queued, processing, retrying, done, error, canceled, expired]
         requested_by:
           type: string
         started_at:
