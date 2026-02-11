@@ -24,34 +24,3 @@ class OllamaClient:
             response = client.post(self.endpoint, json=payload)
             response.raise_for_status()
             return response.json()
-
-    def show_model(self, model_id: str | None = None) -> dict:
-        import httpx
-
-        target_model = model_id or self.model
-        base_url = self.endpoint.rsplit("/api/generate", 1)[0]
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(f"{base_url}/api/show", json={"model": target_model})
-            response.raise_for_status()
-            return response.json()
-
-    def fetch_model_num_ctx(self, model_id: str | None = None) -> int | None:
-        payload = self.show_model(model_id=model_id)
-        details = payload.get("details") if isinstance(payload, dict) else None
-        if isinstance(details, dict):
-            for key in ("num_ctx", "context_length"):
-                value = details.get(key)
-                if isinstance(value, int):
-                    return value
-                if isinstance(value, str) and value.isdigit():
-                    return int(value)
-
-        model_info = payload.get("model_info") if isinstance(payload, dict) else None
-        if isinstance(model_info, dict):
-            for key in ("llama.context_length", "context_length", "num_ctx"):
-                value = model_info.get(key)
-                if isinstance(value, int):
-                    return value
-                if isinstance(value, str) and value.isdigit():
-                    return int(value)
-        return None
