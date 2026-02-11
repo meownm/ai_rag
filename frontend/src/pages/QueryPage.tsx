@@ -22,7 +22,14 @@ export function QueryPage() {
   const onSubmit = async (query: string) => {
     setRefusalMessage(undefined);
     try {
-      await mutation.mutateAsync({ query });
+      const response = await mutation.mutateAsync({ query });
+      if (response.only_sources_verdict === 'FAIL') {
+        const refusalPayload = parseRefusalAnswer(response.answer);
+        if (refusalPayload?.success) {
+          setRefusalMessage(refusalPayload.data.error.message);
+          logEvent('query_refusal', { correlationId: refusalPayload.data.error.correlation_id });
+        }
+      }
     } catch (error) {
       const apiError = error as ApiError;
       const refusal = RefusalSchema.safeParse(apiError.payload);
@@ -46,4 +53,13 @@ export function QueryPage() {
       {showDebug ? <PerformancePanel timings={mutation.data?.timings_ms} /> : null}
     </div>
   );
+}
+
+function parseRefusalAnswer(answer: string) {
+  try {
+    const parsed = JSON.parse(answer) as unknown;
+    return RefusalSchema.safeParse(parsed);
+  } catch {
+    return null;
+  }
 }
