@@ -17,6 +17,8 @@ MODELS = ROOT / "services/corporate-rag-service/app/models/models.py"
 RAG_CONFIG = ROOT / "services/corporate-rag-service/app/core/config.py"
 EMB_CONFIG = ROOT / "services/embeddings-service/app/core/config.py"
 ALEMBIC_DIR = ROOT / "services/corporate-rag-service/alembic/versions"
+RAG_PYPROJECT = ROOT / "services/corporate-rag-service/pyproject.toml"
+EMB_PYPROJECT = ROOT / "services/embeddings-service/pyproject.toml"
 
 
 @dataclass
@@ -124,6 +126,60 @@ def _compare(name: str, frozen: set[str], code: set[str]) -> DriftSection:
     return DriftSection(name=name, missing_in_code=sorted(frozen - code), extra_in_code=sorted(code - frozen))
 
 
+def _extract_poetry_runtime_dependencies(path: Path) -> dict[str, str]:
+    text = _read(path)
+    block_match = re.search(
+        r"\[tool\.poetry\.dependencies\]\n(.*?)(?:\n\[|$)",
+        text,
+        re.S,
+    )
+    if not block_match:
+        return {}
+
+    runtime: dict[str, str] = {}
+    for raw_line in block_match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        simple_match = re.match(r'([a-zA-Z0-9_.-]+)\s*=\s*"([^"]+)"', line)
+        if simple_match:
+            name, version = simple_match.groups()
+            if name != "python":
+                runtime[name] = version
+            continue
+        table_match = re.match(
+            r'([a-zA-Z0-9_.-]+)\s*=\s*\{[^}]*\bversion\s*=\s*"([^"]+)"[^}]*\}',
+            line,
+        )
+        if table_match:
+            name, version = table_match.groups()
+            if name != "python":
+                runtime[name] = version
+    return runtime
+
+
+def _build_shared_runtime_dependency_section() -> dict[str, Any]:
+    rag_deps = _extract_poetry_runtime_dependencies(RAG_PYPROJECT)
+    emb_deps = _extract_poetry_runtime_dependencies(EMB_PYPROJECT)
+    shared = sorted(set(rag_deps) & set(emb_deps))
+    mismatches: list[str] = []
+    aligned: list[str] = []
+    for dep_name in shared:
+        rag_version = rag_deps[dep_name]
+        emb_version = emb_deps[dep_name]
+        if rag_version == emb_version:
+            aligned.append(f"{dep_name}:{rag_version}")
+            continue
+        mismatches.append(f"{dep_name}:rag={rag_version},embeddings={emb_version}")
+    return {
+        "name": "dependencies:shared_python_runtime",
+        "checked": shared,
+        "aligned": aligned,
+        "mismatches": mismatches,
+        "ok": not mismatches,
+    }
+
+
 def build_report() -> dict[str, Any]:
     freeze_text = _read(FREEZE_PATH)
 
@@ -153,8 +209,16 @@ def build_report() -> dict[str, Any]:
     env_section = _compare("env_vars", frozen_env, code_env)
     job_model_section = _compare("job_status:model", frozen_job_status, model_job_status)
     job_migration_section = _compare("job_status:migrations", frozen_job_status, migration_job_status)
+    dependency_section = _build_shared_runtime_dependency_section()
 
-    overall_ok = endpoint_section.ok and env_section.ok and job_model_section.ok and job_migration_section.ok and all(s["ok"] for s in enum_sections)
+    overall_ok = (
+        endpoint_section.ok
+        and env_section.ok
+        and job_model_section.ok
+        and job_migration_section.ok
+        and dependency_section["ok"]
+        and all(s["ok"] for s in enum_sections)
+    )
 
     return {
         "overall_ok": overall_ok,
@@ -163,6 +227,7 @@ def build_report() -> dict[str, Any]:
             {"name": env_section.name, "missing_in_code": env_section.missing_in_code, "extra_in_code": env_section.extra_in_code, "ok": env_section.ok},
             {"name": job_model_section.name, "missing_in_code": job_model_section.missing_in_code, "extra_in_code": job_model_section.extra_in_code, "ok": job_model_section.ok},
             {"name": job_migration_section.name, "missing_in_code": job_migration_section.missing_in_code, "extra_in_code": job_migration_section.extra_in_code, "ok": job_migration_section.ok},
+            dependency_section,
             *enum_sections,
         ],
     }
