@@ -9,6 +9,7 @@ for the future extension point.
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -19,6 +20,7 @@ from typing import Any, Protocol
 from app.clients.embeddings_client import EmbeddingsClient
 from app.cli.fts_rebuild import weighted_fts_expression
 from app.services.storage import ObjectStorage, StorageConfig
+from app.services.tokenizer import token_count
 
 Session = Any
 LOGGER = logging.getLogger(__name__)
@@ -174,7 +176,23 @@ def _canonical_chunk_text(text: str) -> str:
 
 
 def _token_count(text: str) -> int:
-    return len([t for t in text.split() if t])
+    estimator = os.getenv("TOKEN_ESTIMATOR", "split")
+    return token_count(text, estimator=estimator)
+
+
+def _is_table_separator_line(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    parts = [part.strip() for part in stripped.strip("|").split("|")]
+    if not parts:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", part)) for part in parts if part)
+
+
+def _is_pipe_heavy_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.count("|") >= 2
 
 
 def _line_type(line: str, in_code_block: bool) -> str:
@@ -191,13 +209,17 @@ def _line_type(line: str, in_code_block: bool) -> str:
         return "quote"
     if re.match(r"^[-*+]\s+", stripped) or re.match(r"^\d+\.\s+", stripped):
         return "list"
-    if "|" in stripped and stripped.count("|") >= 2:
-        return "table"
     return "paragraph"
 
 
 def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
     lines = markdown.splitlines(keepends=True)
+    line_starts: list[int] = []
+    running = 0
+    for raw_line in lines:
+        line_starts.append(running)
+        running += len(raw_line)
+
     blocks: list[dict[str, Any]] = []
     headings_path: list[str] = []
     in_code_block = False
@@ -214,7 +236,7 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
             current_type = None
             current_lines = []
             return
-        text = "".join(current_lines).strip()
+        text = "".join(current_lines)
         if text:
             blocks.append(
                 {
@@ -229,9 +251,11 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
         current_type = None
         current_lines = []
 
-    for line in lines:
-        line_start = offset
-        offset += len(line)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        line_start = line_starts[i]
+        offset = line_start + len(line)
         line_t = _line_type(line, in_code_block)
 
         if line.strip().startswith("```"):
@@ -239,6 +263,7 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
                 current_lines.append(line)
                 flush(offset)
                 in_code_block = False
+                i += 1
                 continue
             in_code_block = True
             if current_type not in (None, "code"):
@@ -248,18 +273,39 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
                 current_start = line_start
                 current_path = list(headings_path)
             current_lines.append(line)
+            i += 1
             continue
 
         if line_t == "heading":
             flush(line_start)
-            heading_level = len(line) - len(line.lstrip("#"))
-            heading_title = line[heading_level:].strip()
+            stripped = line.lstrip()
+            heading_level = len(stripped) - len(stripped.lstrip("#"))
+            heading_title = stripped[heading_level:].strip()
             headings_path[:] = headings_path[: max(heading_level - 1, 0)]
             headings_path.append(heading_title)
+            i += 1
             continue
+
+        if not in_code_block and _is_pipe_heavy_line(line):
+            j = i
+            has_separator = False
+            while j < len(lines) and _is_pipe_heavy_line(lines[j]) and not lines[j].strip().startswith("```"):
+                has_separator = has_separator or _is_table_separator_line(lines[j])
+                j += 1
+
+            if j - i >= 2 and has_separator:
+                flush(line_start)
+                current_type = "table"
+                current_start = line_start
+                current_path = list(headings_path)
+                current_lines = lines[i:j]
+                flush(line_starts[j] if j < len(lines) else len(markdown))
+                i = j
+                continue
 
         if line_t == "blank":
             flush(line_start)
+            i += 1
             continue
 
         if current_type is None:
@@ -267,10 +313,12 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
             current_start = line_start
             current_path = list(headings_path)
             current_lines = [line]
+            i += 1
             continue
 
         if current_type == line_t and current_path == headings_path:
             current_lines.append(line)
+            i += 1
             continue
 
         flush(line_start)
@@ -278,8 +326,9 @@ def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
         current_start = line_start
         current_path = list(headings_path)
         current_lines = [line]
+        i += 1
 
-    flush(offset)
+    flush(len(markdown))
     return blocks
 
 
@@ -294,34 +343,111 @@ def _split_large_block(
     max_tokens: int,
     overlap_tokens: int,
 ) -> list[dict[str, Any]]:
-    words = text.split()
-    if not words:
-        return []
+    """Split oversized markdown blocks while preserving structural boundaries.
+
+    Structured blocks (`table`, `list`, `quote`) are split line-by-line without overlap.
+    Fenced `code` blocks are emitted as a single chunk to avoid fence corruption.
+    Paragraph-like content keeps token-window splitting with offset-accurate spans.
+    """
     if block_type in {"table", "list", "code", "quote"}:
         overlap = 0
     else:
         overlap = max(0, min(overlap_tokens, max_tokens - 1))
-    step = max(1, max_tokens - overlap)
-
     chunks: list[dict[str, Any]] = []
-    for i in range(0, len(words), step):
-        piece_words = words[i : i + max_tokens]
-        if not piece_words:
-            break
-        piece = " ".join(piece_words)
-        chunks.append(
+
+    if block_type == "code":
+        return [
             {
-                "chunk_type": "mixed" if block_type == "paragraph" else block_type,
+                "chunk_type": "code",
                 "chunk_path": "/".join(headings_path),
-                "chunk_text": piece,
-                "token_count": len(piece_words),
+                "chunk_text": text,
+                "token_count": _token_count(text),
                 "char_start": char_start,
                 "char_end": char_end,
                 "block_start_idx": block_idx,
                 "block_end_idx": block_idx,
             }
+        ] if text else []
+
+    if block_type in {"table", "list", "quote"}:
+        lines = text.splitlines(keepends=True)
+        if not lines:
+            return []
+        line_offsets: list[int] = []
+        running = 0
+        for raw_line in lines:
+            line_offsets.append(running)
+            running += len(raw_line)
+
+        buf: list[str] = []
+        buf_start = 0
+        buf_tokens = 0
+        for idx, line in enumerate(lines):
+            line_tokens = _token_count(line)
+            if buf and buf_tokens + line_tokens > max_tokens:
+                piece = "".join(buf)
+                rel_start = line_offsets[buf_start]
+                rel_end = line_offsets[idx]
+                chunks.append(
+                    {
+                        "chunk_type": block_type,
+                        "chunk_path": "/".join(headings_path),
+                        "chunk_text": piece,
+                        "token_count": _token_count(piece),
+                        "char_start": char_start + rel_start,
+                        "char_end": char_start + rel_end,
+                        "block_start_idx": block_idx,
+                        "block_end_idx": block_idx,
+                    }
+                )
+                buf = []
+                buf_start = idx
+                buf_tokens = 0
+
+            buf.append(line)
+            buf_tokens += line_tokens
+
+        if buf:
+            piece = "".join(buf)
+            rel_start = line_offsets[buf_start]
+            chunks.append(
+                {
+                    "chunk_type": block_type,
+                    "chunk_path": "/".join(headings_path),
+                    "chunk_text": piece,
+                    "token_count": _token_count(piece),
+                    "char_start": char_start + rel_start,
+                    "char_end": char_start + len(text),
+                    "block_start_idx": block_idx,
+                    "block_end_idx": block_idx,
+                }
+            )
+        return chunks
+
+    matches = list(re.finditer(r"\S+", text))
+    if not matches:
+        return []
+    step = max(1, max_tokens - overlap)
+    for i in range(0, len(matches), step):
+        piece_matches = matches[i : i + max_tokens]
+        if not piece_matches:
+            break
+        rel_start = piece_matches[0].start()
+        rel_end = piece_matches[-1].end()
+        piece = text[rel_start:rel_end]
+        chunks.append(
+            {
+                "chunk_type": "mixed" if block_type == "paragraph" else block_type,
+                "chunk_path": "/".join(headings_path),
+                "chunk_text": piece,
+                "token_count": _token_count(piece),
+                "char_start": char_start + rel_start,
+                "char_end": char_start + rel_end,
+                "block_start_idx": block_idx,
+                "block_end_idx": block_idx,
+            }
         )
-        if i + max_tokens >= len(words):
+        if i + max_tokens >= len(matches):
             break
     return chunks
 
@@ -358,7 +484,7 @@ def chunk_markdown(
             {
                 "chunk_type": chunk_type,
                 "chunk_path": "/".join(current_blocks[0][1]["headings_path"]),
-                "chunk_text": "\n".join(b[1]["text"] for b in current_blocks).strip(),
+                "chunk_text": markdown[current_blocks[0][1]["char_start"] : current_blocks[-1][1]["char_end"]],
                 "token_count": current_tokens,
                 "char_start": current_blocks[0][1]["char_start"],
                 "char_end": current_blocks[-1][1]["char_end"],

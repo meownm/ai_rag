@@ -1,6 +1,6 @@
 import uuid
 
-from app.services.ingestion import SourceItem, ingest_sources_sync
+from app.services.ingestion import SourceItem, chunk_markdown, ingest_sources_sync
 
 
 class FakeMappings:
@@ -9,6 +9,9 @@ class FakeMappings:
 
     def all(self):
         return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
 
 class FakeResult:
@@ -83,3 +86,42 @@ def test_ingestion_populates_chunk_metadata_fields_integration(monkeypatch):
     assert isinstance(params["char_end"], int)
     assert isinstance(params["block_start_idx"], int)
     assert isinstance(params["block_end_idx"], int)
+
+
+def test_chunking_structure_and_offsets_integration():
+    markdown = """# H1
+
+  ## H2
+
+| a | b |
+| --- | --- |
+| 1 | 2 |
+
+```python
+print('a')
+print('b')
+```
+
+- item one
+- item two
+"""
+    chunks = chunk_markdown(markdown, target_tokens=5, max_tokens=8, min_tokens=1, overlap_tokens=2)
+    assert chunks
+    assert any(c["chunk_type"] == "table" for c in chunks)
+    assert any(c["chunk_type"] == "code" for c in chunks)
+    assert any(c["chunk_type"] == "list" for c in chunks)
+    for chunk in chunks:
+        extracted = markdown[chunk["char_start"] : chunk["char_end"]]
+        assert chunk["chunk_text"].strip() in extracted
+
+
+def test_chunking_does_not_break_fenced_code_integration():
+    markdown = "# H1\n\n```python\n" + "\n".join(f"print({i})" for i in range(200)) + "\n```\n"
+    chunks = chunk_markdown(markdown, target_tokens=10, max_tokens=15, min_tokens=1, overlap_tokens=2)
+    code_chunks = [c for c in chunks if c["chunk_type"] == "code"]
+    assert len(code_chunks) == 1
+    code_chunk = code_chunks[0]
+    assert code_chunk["chunk_text"].startswith("```python")
+    assert code_chunk["chunk_text"].rstrip().endswith("```")
+    extracted = markdown[code_chunk["char_start"] : code_chunk["char_end"]]
+    assert code_chunk["chunk_text"] == extracted

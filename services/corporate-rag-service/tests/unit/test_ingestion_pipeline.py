@@ -2,7 +2,16 @@ import uuid
 
 import pytest
 
-from app.services.ingestion import EmbeddingIndexingError, SourceItem, _upsert_chunk_vectors, chunk_markdown, ingest_sources_sync, stable_chunk_id
+from app.services.ingestion import (
+    EmbeddingIndexingError,
+    SourceItem,
+    _parse_markdown_blocks,
+    _token_count,
+    _upsert_chunk_vectors,
+    chunk_markdown,
+    ingest_sources_sync,
+    stable_chunk_id,
+)
 
 
 class FakeMappings:
@@ -324,6 +333,85 @@ code line
     assert all("chunk_type" in c for c in chunks)
     assert all(c["char_end"] >= c["char_start"] for c in chunks)
     assert all(c["block_end_idx"] >= c["block_start_idx"] for c in chunks)
+
+
+def test_parse_markdown_blocks_heading_level_h1_positive():
+    blocks = _parse_markdown_blocks("# H1\n\nparagraph\n")
+    assert blocks[0]["headings_path"] == ["H1"]
+
+
+def test_parse_markdown_blocks_heading_level_with_leading_spaces_positive():
+    markdown = "# H1\n\n  ## H2\n\nbody\n"
+    blocks = _parse_markdown_blocks(markdown)
+    assert blocks[0]["headings_path"] == ["H1", "H2"]
+
+
+def test_parse_markdown_blocks_single_pipe_line_is_not_table_negative():
+    blocks = _parse_markdown_blocks("a | b | c\n")
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "paragraph"
+
+
+def test_parse_markdown_blocks_detects_markdown_table_positive():
+    markdown = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+    blocks = _parse_markdown_blocks(markdown)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "table"
+
+
+def test_chunk_markdown_split_large_code_block_preserves_fence_positive():
+    markdown = "# H1\n\n```python\n" + "\n".join(f"print({i})" for i in range(120)) + "\n```\n"
+    chunks = chunk_markdown(markdown, target_tokens=20, max_tokens=25, min_tokens=1, overlap_tokens=5)
+    code_chunks = [c for c in chunks if c["chunk_type"] == "code"]
+    assert len(code_chunks) == 1
+    assert code_chunks[0]["chunk_text"].startswith("```python")
+    assert code_chunks[0]["chunk_text"].rstrip().endswith("```")
+
+
+def test_chunk_markdown_split_table_only_by_lines_positive():
+    table = "| a | b |\n| --- | --- |\n" + "".join(f"| {i} | {i+1} |\n" for i in range(60))
+    chunks = chunk_markdown(table, target_tokens=20, max_tokens=30, min_tokens=1, overlap_tokens=5)
+    table_chunks = [c for c in chunks if c["chunk_type"] == "table"]
+    assert len(table_chunks) >= 2
+    for c in table_chunks:
+        assert c["chunk_text"].endswith("\n")
+        assert "\n|" in c["chunk_text"] or c["chunk_text"].startswith("|")
+
+
+def test_chunk_markdown_split_list_not_mid_item_positive():
+    markdown = "\n".join(f"- item {i} with extra words" for i in range(80)) + "\n"
+    chunks = chunk_markdown(markdown, target_tokens=20, max_tokens=25, min_tokens=1, overlap_tokens=5)
+    list_chunks = [c for c in chunks if c["chunk_type"] == "list"]
+    assert len(list_chunks) >= 2
+    assert all(line.startswith("- ") for c in list_chunks for line in c["chunk_text"].splitlines() if line)
+
+
+def test_chunk_markdown_char_offsets_extract_real_substring_positive():
+    markdown = "# H1\n\nFirst paragraph line.\nSecond line.\n\n- item one\n- item two\n"
+    chunks = chunk_markdown(markdown, target_tokens=10, max_tokens=12, min_tokens=1, overlap_tokens=2)
+    for chunk in chunks:
+        extracted = markdown[chunk["char_start"] : chunk["char_end"]]
+        assert chunk["chunk_text"].strip() in extracted
+
+
+def test_token_estimator_split_mode_backward_compatible_positive(monkeypatch):
+    monkeypatch.setenv("TOKEN_ESTIMATOR", "split")
+    assert _token_count("alpha beta   gamma") == 3
+
+
+def test_token_estimator_tiktoken_fallback_without_dependency_negative(monkeypatch):
+    monkeypatch.setenv("TOKEN_ESTIMATOR", "tiktoken")
+    assert _token_count("alpha beta") >= 2
+
+def test_token_estimator_tiktoken_can_differ_when_installed_positive(monkeypatch):
+    pytest.importorskip("tiktoken")
+    monkeypatch.setenv("TOKEN_ESTIMATOR", "split")
+    split_count = _token_count("hello,world")
+    monkeypatch.setenv("TOKEN_ESTIMATOR", "tiktoken")
+    tk_count = _token_count("hello,world")
+    assert tk_count >= 1
+    assert split_count == 1
+
 
 
 def test_normalize_to_markdown_preserves_fenced_code_block_spacing():
