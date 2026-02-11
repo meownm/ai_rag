@@ -7,6 +7,7 @@ import { logEvent } from '@/lib/logger';
 export type QueryRequestPayload = {
   query: string;
   top_k?: number;
+  citations?: boolean;
 };
 
 export function useQueryRag() {
@@ -19,7 +20,12 @@ export function useQueryRag() {
         '/v1/query',
         {
           method: 'POST',
-          body: JSON.stringify({ tenant_id: tenantId, query: payload.query, top_k: payload.top_k ?? 10 }),
+          body: JSON.stringify({
+            tenant_id: tenantId,
+            query: payload.query,
+            top_k: payload.top_k ?? 10,
+            citations: payload.citations ?? true,
+          }),
         },
         QueryResponseSchema,
       );
