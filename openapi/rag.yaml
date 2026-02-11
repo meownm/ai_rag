@@ -213,6 +213,9 @@ components:
         force_reindex:
           type: boolean
           default: false
+    job_status:
+      type: string
+      enum: [queued, processing, retrying, done, error, canceled, expired]
     JobAcceptedResponse:
       type: object
       required: [job_id, job_status]
@@ -221,8 +224,7 @@ components:
           type: string
           format: uuid
         job_status:
-          type: string
-          enum: [queued, processing, retrying, done, error, canceled, expired]
+          $ref: '#/components/schemas/job_status'
     JobStatusResponse:
       type: object
       required: [job_id, tenant_id, job_type, job_status, requested_by, started_at]
@@ -237,8 +239,7 @@ components:
           type: string
           enum: [SYNC_CONFLUENCE, SYNC_FILE_CATALOG, PREPROCESS, INDEX_LEXICAL, INDEX_VECTOR, REINDEX_ALL]
         job_status:
-          type: string
-          enum: [queued, processing, retrying, done, error, canceled, expired]
+          $ref: '#/components/schemas/job_status'
         requested_by:
           type: string
         started_at:
