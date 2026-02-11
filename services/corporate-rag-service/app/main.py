@@ -8,7 +8,7 @@ from app.core.logging import configure_logging
 
 configure_logging()
 
-app = FastAPI(title="Corporate RAG Service API", version=settings.app_version)
+app = FastAPI(title="Corporate RAG Service API", version=settings.APP_VERSION)
 app.include_router(router)
 
 

@@ -26,7 +26,7 @@ def hybrid_rank(query: str, candidates: list[dict], query_embedding: list[float]
     timer = {}
     t0 = time.perf_counter()
     for c in candidates:
-        c["lex_score"] = lexical_score(query, c["chunk_text"])
+        c["lex_score"] = c.get("lex_score", lexical_score(query, c["chunk_text"]))
     timer["t_lexical_ms"] = int((time.perf_counter() - t0) * 1000)
 
     t1 = time.perf_counter()
