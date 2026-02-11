@@ -99,3 +99,13 @@ IMPLEMENTATION COMPLETE
 - Replaced `scripts/drift_detector.py` with a structured drift analyzer that compares frozen architecture lists to code artifacts for endpoints, enums, env vars, and job status values (models + migrations).
 - Detector now emits a detailed JSON Drift Report with per-section `missing_in_code`, `extra_in_code`, and `ok` fields plus global `overall_ok`.
 - Added unit tests ensuring report structure and required sections are emitted.
+
+## Retrieval/Answer Pipeline Hardening (SP1-SP6)
+
+- Follow-up hardening: aligned Ollama mock/route contract (`generate()` may return dict or raw string), pass tenant/correlation metadata to embeddings requests, and set default `LLM_MODEL` to `qwen3:14b-instruct` while keeping env override behavior.
+- Vector retrieval now executes true pgvector nearest-neighbor search (`<=>`) with tenant isolation and explainable `distance` + `vec_score` trace.
+- FTS rebuild now uses weighted metadata (document title/labels + chunk path + chunk text).
+- Query pipeline now supports rerank-followed neighbor chunk expansion (`±1`) with deterministic cap and trace markers (`added_by_neighbor`, `base_chunk_id`).
+- Answer generation now calls Ollama (non-streaming) with strict grounded JSON protocol and refusal fallback when parsing/citations/validation fail.
+- Conservative context budgeting is applied using word-count proxy with deterministic low-score dropping and budget telemetry.
+- Ingestion now attempts vector upsert and per-chunk weighted FTS upsert hooks for inserted chunks, with DB event logging around index stages/errors.

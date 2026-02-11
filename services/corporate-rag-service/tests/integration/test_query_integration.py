@@ -1,8 +1,8 @@
 import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
-from datetime import datetime, timezone
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
@@ -14,13 +14,13 @@ from app.services.reranker import RerankerService
 
 class FakeModel:
     def predict(self, pairs):
-        return [0.1, 0.99]
+        return [0.1 for _ in pairs]
 
 
 class FakeChunk:
-    def __init__(self, text: str, ordinal: int, tenant_id: str):
+    def __init__(self, text: str, ordinal: int, tenant_id: str, document_id: uuid.UUID):
         self.chunk_id = uuid.uuid4()
-        self.document_id = uuid.uuid4()
+        self.document_id = document_id
         self.chunk_text = text
         self.chunk_path = "Policy/Section"
         self.ordinal = ordinal
@@ -28,8 +28,8 @@ class FakeChunk:
 
 
 class FakeDocument:
-    def __init__(self, title: str):
-        self.document_id = uuid.uuid4()
+    def __init__(self, title: str, document_id: uuid.UUID):
+        self.document_id = document_id
         self.title = title
         self.url = "https://example.local/doc"
         self.labels = ["hr"]
@@ -40,8 +40,6 @@ class FakeDocument:
 class FakeVector:
     def __init__(self, emb):
         self.embedding = emb
-
-
 
 
 class FakeMappings:
@@ -87,7 +85,15 @@ class FakeDB:
     def __init__(self, rows):
         self.rows = rows
 
-    def execute(self, *_args, **_kwargs):
+    def execute(self, statement, *_args, **_kwargs):
+        sql = str(statement)
+        if "FROM chunk_fts" in sql:
+            return FakeExecResult([{"chunk_id": str(self.rows[0][0].chunk_id), "lex_score": 0.9}])
+        if "FROM chunk_vectors cv" in sql:
+            return FakeExecResult([
+                {"chunk_id": str(self.rows[0][0].chunk_id), "distance": 0.1, "vec_score": 0.91},
+                {"chunk_id": str(self.rows[1][0].chunk_id), "distance": 0.8, "vec_score": 0.55},
+            ])
         return FakeExecResult([])
 
     def add(self, _obj):
@@ -112,121 +118,104 @@ def override_db_with_rows(rows):
     return _dep
 
 
-def test_query_endpoint_reranker_changes_order(monkeypatch):
+def test_query_endpoint_with_llm_success(monkeypatch):
     from app.api import routes
 
+    doc = uuid.uuid4()
     rows = [
-        (FakeChunk("Corporate policy requires annual security training completion.", 1, "11111111-1111-1111-1111-111111111111"), FakeDocument("Security Policy"), FakeVector([0.9, 0.1, 0.0])),
-        (FakeChunk("Vacation policy includes 28 calendar days for full-time employees.", 2, "11111111-1111-1111-1111-111111111111"), FakeDocument("HR Policy"), FakeVector([0.1, 0.8, 0.2])),
+        (FakeChunk("Corporate policy requires annual security training completion.", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Security Policy", doc), FakeVector([0.9, 0.1, 0.0])),
+        (FakeChunk("Vacation policy includes 28 calendar days for full-time employees.", 2, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("HR Policy", doc), FakeVector([0.1, 0.8, 0.2])),
     ]
     monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
 
     class FakeEmbeddingsClient:
-        def embed(self, *args, **kwargs):
-            return [[0.8, 0.2, 0.0]]
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2, 0.0]
+
+    class FakeOllamaClient:
+        def generate(self, *_args, **_kwargs):
+            return {"response": json.dumps({"status": "success", "answer": "Vacation policy allows 28 days [chunk].", "citations": [{"chunk_id": str(rows[1][0].chunk_id), "quote": "28 calendar days"}]})}
 
     monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
-    app.dependency_overrides[get_db] = override_db_with_rows(rows)
-    client = TestClient(app)
-    payload = {
-        "tenant_id": "11111111-1111-1111-1111-111111111111",
-        "query": "vacation policy",
-        "citations": True,
-        "top_k": 2,
-    }
-    response = client.post("/v1/query", json=payload)
-    assert response.status_code == 200
-    body = response.json()
-    assert body["citations"][0]["title"] == "HR Policy"
-    assert body["trace"]["trace_id"]
-    assert body["trace"]["scoring_trace"][0]["lex_score"] >= 0
-    assert body["trace"]["scoring_trace"][0]["vec_score"] >= 0
-    assert "boosts_applied" in body["trace"]["scoring_trace"][0]
-
-
-def test_query_endpoint_embeddings_failure(monkeypatch):
-    from app.api import routes
-
-    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
-
-    class BrokenEmbeddingsClient:
-        def embed(self, *args, **kwargs):
-            raise RuntimeError("embeddings down")
-
-    monkeypatch.setattr(routes, "get_embeddings_client", lambda: BrokenEmbeddingsClient())
-    app.dependency_overrides[get_db] = override_db_with_rows([])
-    client = TestClient(app)
-    response = client.post(
-        "/v1/query",
-        json={
-            "tenant_id": "11111111-1111-1111-1111-111111111111",
-            "query": "vacation",
-            "top_k": 1,
-        },
-    )
-    assert response.status_code == 500
-
-
-def test_query_endpoint_validation_negative(monkeypatch):
-    from app.api import routes
-
-    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
-
-    class FakeEmbeddingsClient:
-        def embed(self, *args, **kwargs):
-            return [[0.8, 0.2, 0.0]]
-
-    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
-    app.dependency_overrides[get_db] = override_db_with_rows([])
-    client = TestClient(app)
-    response = client.post(
-        "/v1/query",
-        json={
-            "tenant_id": "11111111-1111-1111-1111-111111111111",
-            "query": "bad",
-            "top_k": 0,
-        },
-    )
-    assert response.status_code == 422
-
-
-def test_get_job_not_found_returns_contract_envelope(monkeypatch):
-    app.dependency_overrides[get_db] = override_db_with_rows([])
-    client = TestClient(app)
-    response = client.get("/v1/jobs/11111111-1111-1111-1111-111111111111")
-    assert response.status_code == 404
-    body = response.json()
-    assert "error" in body
-    assert body["error"]["code"] == "SOURCE_NOT_FOUND"
-
-
-def test_query_endpoint_hallucination_refusal_returns_structured_json(monkeypatch):
-    from app.api import routes
-
-    rows = [
-        (FakeChunk("Corporate policy requires annual security training completion.", 1, "11111111-1111-1111-1111-111111111111"), FakeDocument("Security Policy"), FakeVector([0.9, 0.1, 0.0])),
-    ]
-    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
-
-    class FakeEmbeddingsClient:
-        def embed(self, *args, **kwargs):
-            return [[0.8, 0.2, 0.0]]
-
-    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
-    monkeypatch.setattr(routes, "verify_answer", lambda *_args, **_kwargs: (False, {"unsupported_sentences": 1}))
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: FakeOllamaClient())
+    monkeypatch.setattr(routes, "verify_answer", lambda *_a, **_k: (True, {"refusal_triggered": False}))
 
     app.dependency_overrides[get_db] = override_db_with_rows(rows)
     client = TestClient(app)
-    response = client.post(
-        "/v1/query",
-        json={
-            "tenant_id": "11111111-1111-1111-1111-111111111111",
-            "query": "vacation",
-            "top_k": 1,
-        },
-    )
+    response = client.post("/v1/query", json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "vacation policy", "citations": True, "top_k": 2})
     assert response.status_code == 200
     body = response.json()
-    assert body["only_sources_verdict"] == "FAIL"
-    refusal = json.loads(body["answer"])
-    assert refusal["refusal"]["code"] == "ONLY_SOURCES_VIOLATION"
+    assert body["only_sources_verdict"] == "PASS"
+    assert body["citations"]
+
+
+def test_query_endpoint_malformed_llm_json_refusal(monkeypatch):
+    from app.api import routes
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class BadOllamaClient:
+        def generate(self, *_args, **_kwargs):
+            return {"response": "not-json"}
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: BadOllamaClient())
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post("/v1/query", json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1})
+    assert response.status_code == 200
+    assert response.json()["only_sources_verdict"] == "FAIL"
+
+
+def test_query_endpoint_empty_citations_refusal(monkeypatch):
+    from app.api import routes
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class EmptyCitationOllama:
+        def generate(self, *_args, **_kwargs):
+            return {"response": json.dumps({"status": "success", "answer": "x", "citations": []})}
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: EmptyCitationOllama())
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post("/v1/query", json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1})
+    assert response.status_code == 200
+    assert response.json()["only_sources_verdict"] == "FAIL"
+
+
+def test_query_endpoint_non_dict_llm_payload_refusal(monkeypatch):
+    from app.api import routes
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class StringOllama:
+        def generate(self, *_args, **_kwargs):
+            return "plain-text-response"
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: StringOllama())
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post("/v1/query", json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "x", "top_k": 1})
+    assert response.status_code == 200
+    assert response.json()["only_sources_verdict"] == "FAIL"

@@ -12,6 +12,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def weighted_fts_expression() -> str:
+    return """
+    setweight(to_tsvector('simple', coalesce(d.title, '')), 'A')
+    || setweight(to_tsvector('simple', coalesce(CAST(d.labels AS text), '')), 'B')
+    || setweight(to_tsvector('simple', coalesce(c.chunk_path, '')), 'B')
+    || setweight(to_tsvector('simple', coalesce(c.chunk_text, '')), 'C')
+    """
+
+
 def rebuild_fts(tenant_id: str | None = None, all_tenants: bool = False) -> int:
     from sqlalchemy import text
 
@@ -28,9 +37,10 @@ def rebuild_fts(tenant_id: str | None = None, all_tenants: bool = False) -> int:
         INSERT INTO chunk_fts (tenant_id, chunk_id, fts_doc, updated_at)
         SELECT c.tenant_id,
                c.chunk_id,
-               to_tsvector('simple', coalesce(c.chunk_text, '')),
+               ({weighted_fts_expression()}),
                now()
         FROM chunks c
+        JOIN documents d ON d.document_id = c.document_id
         {where_clause}
         ON CONFLICT (tenant_id, chunk_id)
         DO UPDATE

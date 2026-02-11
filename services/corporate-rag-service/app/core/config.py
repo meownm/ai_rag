@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     LLM_PROVIDER: str = "ollama"
     LLM_ENDPOINT: str = "http://localhost:11434/api/generate"
-    LLM_MODEL: str = "llama3.1"
+    LLM_MODEL: str = "qwen3:14b-instruct"
     LLM_API_KEY: str = ""
 
     REQUEST_TIMEOUT_SECONDS: int = 30
