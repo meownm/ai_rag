@@ -31,7 +31,8 @@ def hybrid_rank(query: str, candidates: list[dict], query_embedding: list[float]
 
     t1 = time.perf_counter()
     for c in candidates:
-        c["vec_score"] = vector_score(query_embedding, c["embedding"])
+        computed = vector_score(query_embedding, c["embedding"])
+        c["vec_score"] = max(float(c.get("vec_score", 0.0)), computed)
     timer["t_vector_ms"] = int((time.perf_counter() - t1) * 1000)
 
     for c in candidates:

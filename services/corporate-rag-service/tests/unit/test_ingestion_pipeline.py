@@ -3,8 +3,22 @@ import uuid
 from app.services.ingestion import SourceItem, chunk_markdown, ingest_sources_sync, stable_chunk_id
 
 
+class FakeMappings:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
 class FakeResult:
     rowcount = 1
+
+    def __init__(self, rows=None):
+        self._rows = rows or []
+
+    def mappings(self):
+        return FakeMappings(self._rows)
 
 
 class FakeDb:
@@ -12,8 +26,16 @@ class FakeDb:
         self.calls = []
 
     def execute(self, statement, params=None):
-        self.calls.append((str(statement), params or {}))
+        stmt = str(statement)
+        payload = params or {}
+        self.calls.append((stmt, payload))
+        if "SELECT chunk_id, chunk_text FROM chunks" in stmt:
+            chunk_ids = payload.get("chunk_ids", [])
+            return FakeResult([{"chunk_id": cid, "chunk_text": "chunk text"} for cid in chunk_ids])
         return FakeResult()
+
+    def commit(self):
+        return None
 
 
 class FakeStorage:
@@ -65,10 +87,19 @@ def test_chunk_markdown_negative_empty():
     assert chunk_markdown("   \n\n") == []
 
 
-def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive():
+def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive(monkeypatch):
     db = FakeDb()
     storage = FakeStorage()
     tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_text(self, *_args, **_kwargs):
+            return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
     result = ingest_sources_sync(
         db,
         tenant,
@@ -87,6 +118,8 @@ def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive():
     assert "INSERT INTO chunks" in sql_text
     assert "INSERT INTO cross_links" in sql_text
     assert "INSERT INTO source_versions" in sql_text
+    assert "INSERT INTO chunk_vectors" in sql_text
+    assert "INSERT INTO chunk_fts" in sql_text
 
     buckets = [x[0] for x in storage.put_calls]
     assert "rag-raw" in buckets

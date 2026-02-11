@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from app.clients.embeddings_client import EmbeddingsClient
+from app.cli.fts_rebuild import weighted_fts_expression
 from app.services.storage import ObjectStorage, StorageConfig
 
 Session = Any
@@ -265,6 +267,99 @@ def _insert_links(db: Session, document_id: uuid.UUID, links: list[str]) -> int:
     return created
 
 
+
+def _log_ingest_event(db: Session, tenant_id: uuid.UUID, event_type: str, payload: dict) -> None:
+    db.execute(
+        _sql(
+            """
+            INSERT INTO event_logs (event_id, tenant_id, correlation_id, event_type, log_data_mode, payload_json)
+            VALUES (:event_id, :tenant_id, :correlation_id, :event_type, 'PLAIN', CAST(:payload AS jsonb))
+            """
+        ),
+        {
+            "event_id": uuid.uuid4(),
+            "tenant_id": tenant_id,
+            "correlation_id": uuid.uuid4(),
+            "event_type": event_type,
+            "payload": json.dumps(payload),
+        },
+    )
+
+
+def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uuid.UUID]) -> None:
+    if not chunk_ids:
+        return
+    cfg = _load_settings()
+    batch_size = int(getattr(cfg, "MAX_EMBED_BATCH_SIZE", 64))
+    client = EmbeddingsClient(getattr(cfg, "EMBEDDINGS_SERVICE_URL", None), getattr(cfg, "EMBEDDINGS_TIMEOUT_SECONDS", 30))
+
+    query_result = db.execute(
+        _sql("SELECT chunk_id, chunk_text FROM chunks WHERE tenant_id = :tenant_id AND chunk_id = ANY(:chunk_ids) ORDER BY ordinal"),
+        {"tenant_id": tenant_id, "chunk_ids": chunk_ids},
+    )
+    if not hasattr(query_result, "mappings"):
+        return
+    rows = query_result.mappings().all()
+
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i : i + batch_size]
+        t0 = datetime.now(timezone.utc)
+        try:
+            for row in batch:
+                _log_ingest_event(db, tenant_id, "EMBEDDINGS_REQUEST", {"chunk_id": str(row["chunk_id"]), "model": "bge-m3"})
+                emb = client.embed_text(str(row["chunk_text"]), tenant_id=str(tenant_id), correlation_id=str(uuid.uuid4()))
+                _log_ingest_event(db, tenant_id, "EMBEDDINGS_RESPONSE", {"chunk_id": str(row["chunk_id"]), "dimensions": len(emb)})
+                db.execute(
+                    _sql(
+                        """
+                        INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim)
+                        VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim)
+                        ON CONFLICT (chunk_id) DO UPDATE
+                        SET tenant_id = EXCLUDED.tenant_id,
+                            embedding_model = EXCLUDED.embedding_model,
+                            embedding = EXCLUDED.embedding,
+                            embedding_dim = EXCLUDED.embedding_dim
+                        """
+                    ),
+                    {
+                        "chunk_id": row["chunk_id"],
+                        "tenant_id": tenant_id,
+                        "embedding_model": "bge-m3",
+                        "embedding": "[" + ",".join(f"{float(x):.8f}" for x in emb) + "]",
+                        "embedding_dim": len(emb),
+                    },
+                )
+            elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+            _log_ingest_event(db, tenant_id, "PIPELINE_STAGE", {"stage": "INDEX_VECTOR", "batch_size": len(batch), "duration_ms": elapsed_ms})
+        except Exception as exc:  # noqa: BLE001
+            _log_ingest_event(db, tenant_id, "ERROR", {"code": "VECTOR_INDEX_ERROR", "message": str(exc), "batch_start": i})
+
+
+def _upsert_fts_for_chunks(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uuid.UUID]) -> None:
+    if not chunk_ids:
+        return
+    db.execute(
+        _sql(
+            f"""
+            INSERT INTO chunk_fts (tenant_id, chunk_id, fts_doc, updated_at)
+            SELECT c.tenant_id,
+                   c.chunk_id,
+                   ({weighted_fts_expression()}),
+                   now()
+            FROM chunks c
+            JOIN documents d ON d.document_id = c.document_id
+            WHERE c.tenant_id = :tenant_id
+              AND c.chunk_id = ANY(:chunk_ids)
+            ON CONFLICT (tenant_id, chunk_id) DO UPDATE
+            SET fts_doc = EXCLUDED.fts_doc,
+                updated_at = now()
+            """
+        ),
+        {"tenant_id": tenant_id, "chunk_ids": chunk_ids},
+    )
+    _log_ingest_event(db, tenant_id, "PIPELINE_STAGE", {"stage": "INDEX_BM25", "chunks_indexed": len(chunk_ids)})
+
+
 def ingest_sources_sync(
     db: Session,
     tenant_id: uuid.UUID,
@@ -298,6 +393,8 @@ def ingest_sources_sync(
         source_version_id = _insert_source_version(db, source_id, checksum, raw_uri, md_uri)
         document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
         chunk_ids = _insert_chunks(db, tenant_id, document_id, source_version_id, markdown)
+        _upsert_chunk_vectors(db, tenant_id, chunk_ids)
+        _upsert_fts_for_chunks(db, tenant_id, chunk_ids)
 
         links_found = extract_links(markdown)
         links += _insert_links(db, document_id, links_found)
@@ -317,4 +414,6 @@ def ingest_sources_sync(
         docs += 1
         chunks += len(chunk_ids)
 
+    if hasattr(db, "commit"):
+        db.commit()
     return {"documents": docs, "chunks": chunks, "cross_links": links, "artifacts": artifacts}
