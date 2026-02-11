@@ -32,7 +32,6 @@ from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
 from app.services.scoring_trace import build_scoring_trace
-from app.services.telemetry import emit_metric, log_stage_latency
 from app.runners.conversation_summarizer import ConversationSummarizer
 from app.runners.query_rewriter import QueryRewriteError, QueryRewriter
 
@@ -360,10 +359,6 @@ def post_query(
                 "LLM_RESPONSE",
                 {"model": settings.REWRITE_MODEL_ID, "keep_alive": settings.REWRITE_KEEP_ALIVE, "component": "query_rewriter", "confidence": rewrite_result.confidence},
             )
-            if settings.ENABLE_PER_STAGE_LATENCY_METRICS:
-                rewrite_ms = int((time.perf_counter() - t_start) * 1000)
-                log_stage_latency(stage="rewrite_agent", latency_ms=rewrite_ms, model_id=settings.REWRITE_MODEL_ID, request_id=str(corr))
-                emit_metric("rag_rewrite_latency", rewrite_ms)
         except (QueryRewriteError, ValueError, KeyError, json.JSONDecodeError) as exc:
             log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "B-REWRITE-FAILED", "message": str(exc)})
             raise _error("B-REWRITE-FAILED", "Query rewrite failed", corr, True, status.HTTP_502_BAD_GATEWAY)
@@ -391,7 +386,7 @@ def post_query(
         if clarification_enabled and conversation_repo is not None and conversation_id is not None and user_turn is not None:
             clarification_streak = conversation_repo.count_recent_consecutive_clarifications(conversation_id)
             should_ask = bool(rewrite_result and rewrite_result.clarification_needed and rewrite_result.confidence < settings.REWRITE_CONFIDENCE_THRESHOLD)
-            if should_ask and clarification_streak < settings.MAX_CLARIFICATION_DEPTH:
+            if should_ask and clarification_streak < 2:
                 clarification_text = (rewrite_result.clarification_question or "Please clarify your request.").strip()
                 conversation_repo.create_turn(conversation_id, "assistant", clarification_text, meta={"correlation_id": str(corr), "clarification": True})
                 t_total_ms = int((time.perf_counter() - t_start) * 1000)
@@ -400,18 +395,6 @@ def post_query(
                 return QueryResponse(
                     answer=clarification_text,
                     only_sources_verdict="PASS",
-                    citations=[],
-                    correlation_id=corr,
-                    trace={"trace_id": corr, "scoring_trace": []},
-                )
-
-            elif should_ask and clarification_streak >= settings.MAX_CLARIFICATION_DEPTH:
-                fallback_message = "Похоже, недостаточно информации для ответа... Попробуйте уточнить вопрос и сузить область поиска."
-                log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_streak, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
-                conversation_repo.create_turn(conversation_id, "assistant", fallback_message, meta={"correlation_id": str(corr), "clarification_limit_exceeded": True})
-                return QueryResponse(
-                    answer=fallback_message,
-                    only_sources_verdict="FAIL",
                     citations=[],
                     correlation_id=corr,
                     trace={"trace_id": corr, "scoring_trace": []},
@@ -428,9 +411,6 @@ def post_query(
     t_parse0 = time.perf_counter()
     candidates, lexical_ms = _fetch_candidates(db, str(payload.tenant_id), resolved_query_text, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
     t_parse_ms = int((time.perf_counter() - t_parse0) * 1000)
-    if settings.ENABLE_PER_STAGE_LATENCY_METRICS:
-        log_stage_latency(stage="retrieval_agent", latency_ms=t_parse_ms, model_id=settings.EMBEDDINGS_DEFAULT_MODEL_ID, request_id=str(corr))
-        emit_metric("rag_retrieval_latency", t_parse_ms)
 
     ranked, timers = hybrid_rank(
         resolved_query_text,
@@ -544,12 +524,6 @@ def post_query(
     ]
 
     t_citations_ms = int((time.perf_counter() - t_citations0) * 1000)
-    if settings.ENABLE_PER_STAGE_LATENCY_METRICS:
-        analysis_ms = int(timers.get("t_vector_ms", 0) + t_rerank)
-        log_stage_latency(stage="analysis_agent", latency_ms=analysis_ms, model_id=settings.RERANKER_MODEL, request_id=str(corr))
-        emit_metric("rag_analysis_latency", analysis_ms)
-        log_stage_latency(stage="answer_agent", latency_ms=t_llm_ms if t_llm_ms > 0 else t_citations_ms, model_id=settings.LLM_MODEL, request_id=str(corr))
-        emit_metric("rag_answer_latency", t_llm_ms if t_llm_ms > 0 else t_citations_ms)
     t_total_ms = int((time.perf_counter() - t_start) * 1000)
     perf = {
         "t_parse_ms": t_parse_ms,
@@ -569,18 +543,9 @@ def post_query(
     if exceeded:
         log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"message": "perf_budget_exceeded", "exceeded": exceeded, "perf": perf, "budgets": budgets})
 
-    response_confidence = 0.0
-    if chosen:
-        response_confidence = float(chosen[0].get("final_score", 0.0) or 0.0)
-
-    if response_confidence < settings.CONFIDENCE_FALLBACK_THRESHOLD:
-        answer = "Похоже, недостаточно информации для ответа... Попробуйте сузить область запроса."
-        only_sources = "FAIL"
-
     trace = build_scoring_trace(str(corr), chosen)
     trace["anti_hallucination"] = anti_payload
     trace["timing"] = perf
-    trace["confidence"] = response_confidence
 
     if conversation_repo is not None and conversation_id is not None and user_turn is not None:
         trace_rows = _build_retrieval_trace_rows(conversation_id, user_turn.turn_id, tenant_safe_ranked, chosen)
