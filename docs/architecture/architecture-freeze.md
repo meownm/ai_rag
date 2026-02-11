@@ -395,4 +395,343 @@ Simplifications explicitly forbidden and not applied.
 ---
 
 # ARCHITECTURE_FINGERPRINT
-ARCHITECTURE_FINGERPRINT: `AF-v1|services:rag+emb|retrieval:bm25+pgvector+cross-encoder|tenancy:pg-local-groups|storage:s3-minio|guard:only-sources-strict|enum:ENUM_FREEZE_V1|jobs:JOB_STATUS_FREEZE_V1`
+LIST_ENDPOINTS:
+- corporate-rag-service: GET /v1/health
+- corporate-rag-service: POST /v1/query
+- corporate-rag-service: POST /v1/ingest/sources/sync
+- corporate-rag-service: GET /v1/jobs/{job_id}
+- embeddings-service: GET /v1/health
+- embeddings-service: POST /v1/embeddings
+
+LIST_ENUMS:
+- source_type:
+    - CONFLUENCE_PAGE
+    - CONFLUENCE_ATTACHMENT
+    - FILE_CATALOG_OBJECT
+- source_status:
+    - DISCOVERED
+    - FETCHED
+    - NORMALIZED
+    - INDEXED
+    - FAILED
+- tenant_role:
+    - TENANT_ADMIN
+    - TENANT_EDITOR
+    - TENANT_VIEWER
+- citations_mode:
+    - DISABLED
+    - OPTIONAL
+    - REQUIRED
+- only_sources_mode:
+    - STRICT
+- job_type:
+    - SYNC_CONFLUENCE
+    - SYNC_FILE_CATALOG
+    - PREPROCESS
+    - INDEX_LEXICAL
+    - INDEX_VECTOR
+    - REINDEX_ALL
+- job_status:
+    - QUEUED
+    - RUNNING
+    - SUCCEEDED
+    - FAILED
+    - CANCELLED
+    - PARTIAL_SUCCESS
+- link_type:
+    - CONFLUENCE_PAGE_LINK
+    - EXTERNAL_URL
+    - ATTACHMENT_LINK
+- pipeline_stage:
+    - INGEST_DISCOVERY
+    - INGEST_FETCH
+    - NORMALIZE_MARKDOWN
+    - STRUCTURE_PARSE
+    - CHUNK_LOGICAL
+    - INDEX_BM25
+    - EMBED_REQUEST
+    - INDEX_VECTOR
+    - SEARCH_LEXICAL
+    - SEARCH_VECTOR
+    - FUSION_BOOST
+    - RERANK
+    - ANSWER_COMPOSE
+    - ANSWER_VALIDATE_ONLY_SOURCES
+- pipeline_stage_status:
+    - STARTED
+    - COMPLETED
+    - FAILED
+    - SKIPPED
+- event_type:
+    - API_REQUEST
+    - API_RESPONSE
+    - EMBEDDINGS_REQUEST
+    - EMBEDDINGS_RESPONSE
+    - LLM_REQUEST
+    - LLM_RESPONSE
+    - PIPELINE_STAGE
+    - ERROR
+- log_data_mode:
+    - PLAIN
+    - MASKED
+    - HASHED
+- error_code:
+    - AUTH_UNAUTHORIZED
+    - AUTH_FORBIDDEN_TENANT
+    - TENANT_NOT_FOUND
+    - SOURCE_NOT_FOUND
+    - SOURCE_FETCH_FAILED
+    - NORMALIZATION_FAILED
+    - CHUNKING_FAILED
+    - EMBEDDINGS_HTTP_ERROR
+    - EMBEDDINGS_TIMEOUT
+    - VECTOR_INDEX_ERROR
+    - LEXICAL_INDEX_ERROR
+    - RERANKER_ERROR
+    - ONLY_SOURCES_VIOLATION
+    - LLM_PROVIDER_ERROR
+    - VALIDATION_ERROR
+    - RATE_LIMITED
+    - INTERNAL_ERROR
+- only_sources_verdict:
+    - PASS
+    - FAIL
+- health_status:
+    - ok
+- embeddings_encoding_format:
+    - float
+- embeddings_response_object:
+    - list
+
+LIST_TABLES:
+- tenants:
+    - tenant_id (uuid)
+    - tenant_key (string)
+    - display_name (string)
+    - is_active (boolean)
+    - created_at (timestamp)
+    - updated_at (timestamp)
+- tenant_settings:
+    - tenant_id (uuid)
+    - citations_mode (enum)
+    - only_sources_mode (enum)
+    - default_prompt_template (string)
+    - metadata_boost_profile (jsonb)
+    - link_boost_profile (jsonb)
+- groups:
+    - group_id (string)
+    - group_name (string)
+- local_groups:
+    - group_id (string)
+    - group_name (string)
+- tenant_group_bindings:
+    - tenant_id (uuid)
+    - group_id (string)
+    - role (enum)
+- users:
+    - user_id (string)
+    - principal_name (string)
+    - display_name (string)
+- user_groups:
+    - user_id (string)
+    - group_id (string)
+- user_group_memberships:
+    - user_id (string)
+    - group_id (string)
+- sources:
+    - source_id (string)
+    - tenant_id (uuid)
+    - source_type (enum)
+    - external_ref (string)
+    - status (enum)
+    - created_at (timestamp)
+    - updated_at (timestamp)
+- source_versions:
+    - source_version_id (string)
+    - source_id (string)
+    - version_label (string)
+    - checksum (string)
+    - s3_raw_uri (string)
+    - s3_markdown_uri (string)
+    - metadata_json (jsonb)
+    - discovered_at (timestamp)
+- documents:
+    - document_id (string)
+    - tenant_id (uuid)
+    - source_id (string)
+    - source_version_id (string)
+    - title (string)
+    - author (string)
+    - created_date (date)
+    - updated_date (date)
+    - space_key (string)
+    - page_id (string)
+    - parent_id (string)
+    - url (string)
+    - labels (jsonb)
+- cross_links:
+    - from_document_id (string)
+    - to_document_id (string)
+    - link_url (string)
+    - link_type (enum)
+- document_links:
+    - from_document_id (string)
+    - to_document_id (string)
+    - link_url (string)
+    - link_type (enum)
+- chunks:
+    - chunk_id (string)
+    - document_id (string)
+    - tenant_id (uuid)
+    - chunk_path (string)
+    - chunk_text (text)
+    - token_count (integer)
+    - ordinal (integer)
+- chunk_fts:
+    - chunk_id (string)
+    - tenant_id (uuid)
+    - fts_doc (tsvector)
+- embeddings_refs:
+    - chunk_id (string)
+    - tenant_id (uuid)
+    - embedding_model (string)
+    - embedding (vector)
+    - embedding_dim (integer)
+- chunk_vectors:
+    - chunk_id (string)
+    - tenant_id (uuid)
+    - embedding_model (string)
+    - embedding (vector)
+    - embedding_dim (integer)
+- jobs:
+    - job_id (string)
+    - tenant_id (uuid)
+    - job_type (enum)
+    - job_status (enum)
+    - requested_by (string)
+    - started_at (timestamp)
+    - finished_at (timestamp)
+    - error_code (string)
+    - error_message (string)
+- ingest_jobs:
+    - job_id (string)
+    - tenant_id (uuid)
+    - job_type (enum)
+    - job_status (enum)
+    - requested_by (string)
+    - started_at (timestamp)
+    - finished_at (timestamp)
+    - error_code (string)
+    - error_message (string)
+- search_requests:
+    - search_id (string)
+    - tenant_id (uuid)
+    - user_id (string)
+    - query_text (text)
+    - citations_requested (boolean)
+- search_candidates:
+    - search_id (string)
+    - chunk_id (string)
+    - lex_score (float)
+    - vec_score (float)
+    - rerank_score (float)
+    - boosts_json (jsonb)
+    - final_score (float)
+    - rank_position (integer)
+- answers:
+    - answer_id (string)
+    - search_id (string)
+    - answer_text (text)
+    - only_sources_verdict (enum)
+    - citations_json (jsonb)
+- logs:
+    - event_id (string)
+    - tenant_id (uuid)
+    - correlation_id (uuid)
+    - event_type (enum)
+    - log_data_mode (enum)
+    - payload_json (jsonb)
+    - duration_ms (integer)
+    - created_at (timestamp)
+- event_logs:
+    - event_id (string)
+    - tenant_id (uuid)
+    - correlation_id (uuid)
+    - event_type (enum)
+    - log_data_mode (enum)
+    - payload_json (jsonb)
+    - duration_ms (integer)
+    - created_at (timestamp)
+- pipeline_trace:
+    - trace_id (string)
+    - tenant_id (uuid)
+    - correlation_id (uuid)
+    - stage (enum)
+    - status (enum)
+    - started_at (timestamp)
+    - ended_at (timestamp)
+    - payload_json (jsonb)
+
+LIST_ENV_VARS:
+- DB_HOST
+- DB_PORT
+- DB_NAME
+- DB_USER
+- DB_PASSWORD
+- DATABASE_URL
+- PGVECTOR_ENABLED
+- S3_ENDPOINT
+- S3_ACCESS_KEY
+- S3_SECRET_KEY
+- S3_BUCKET_RAW
+- S3_BUCKET_MARKDOWN
+- S3_REGION
+- S3_SECURE
+- OLLAMA_BASE_URL
+- OLLAMA_MODEL
+- EMBEDDINGS_SERVICE_URL
+- RAG_SERVICE_PORT
+- EMBEDDINGS_SERVICE_PORT
+- LOG_DATA_MODE
+- RERANKER_MODEL
+- RERANKER_TOP_K
+- LLM_PROVIDER
+- LLM_ENDPOINT
+- LLM_MODEL
+- LLM_API_KEY
+- REQUEST_TIMEOUT_SECONDS
+- EMBEDDINGS_TIMEOUT_SECONDS
+- MAX_EMBED_BATCH_SIZE
+- DEFAULT_TOP_K
+
+LIST_JOB_STATUS:
+- queued
+- processing
+- retrying
+- done
+- error
+- canceled
+- expired
+
+LIST_ERROR_CODES:
+- B-xxxx
+- Q-xxxx
+- W-xxxx
+- S-xxxx
+- AUTH_UNAUTHORIZED
+- AUTH_FORBIDDEN_TENANT
+- TENANT_NOT_FOUND
+- SOURCE_NOT_FOUND
+- SOURCE_FETCH_FAILED
+- NORMALIZATION_FAILED
+- CHUNKING_FAILED
+- EMBEDDINGS_HTTP_ERROR
+- EMBEDDINGS_TIMEOUT
+- VECTOR_INDEX_ERROR
+- LEXICAL_INDEX_ERROR
+- RERANKER_ERROR
+- ONLY_SOURCES_VIOLATION
+- LLM_PROVIDER_ERROR
+- VALIDATION_ERROR
+- RATE_LIMITED
+- INTERNAL_ERROR
