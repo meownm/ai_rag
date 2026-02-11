@@ -51,3 +51,51 @@ Status: no contract drift on endpoints, enums, and job status values.
 SELF-AUDIT PASSED
 
 IMPLEMENTATION COMPLETE
+
+
+## SP3 update: PostgreSQL FTS lexical retrieval
+- Added Alembic migration `0002_chunk_fts_upgrade.py` to align `chunk_fts` with composite PK `(tenant_id, chunk_id)`, `updated_at`, and a GIN index on `fts_doc`.
+- Added CLI command `python -m app.cli.fts_rebuild --tenant <id> [--all]` to rebuild/upsert lexical vectors from `chunks.chunk_text` into `chunk_fts`.
+- Integrated FTS lookup (`plainto_tsquery`, `ts_rank_cd`) in query candidate collection and merged lexical + vector candidates by `chunk_id`.
+- Search timing now records `t_lexical_ms` from FTS query execution.
+- Added positive/negative unit tests for CLI and lexical candidate merge, and a Postgres integration test (env-gated by `TEST_DATABASE_URL`).
+
+
+## SP4 update: Ingestion pipeline implementation
+- `POST /v1/ingest/sources/sync` now executes synchronous ingestion workflow and updates job status to `done`/`error` with terminal timestamps.
+- Added ingestion service (`app/services/ingestion.py`) with crawlers abstraction for Confluence on-prem and file catalog sources, markdown normalization, link extraction, chunking, stable chunk_id computation, and inserts into `sources`, `source_versions`, `documents`, `chunks`, `document_links`, `cross_links`.
+- Added migration `0003_add_cross_links_table.py` to provide frozen `cross_links` storage used by ingestion graph persistence.
+- Added tests for deterministic chunk IDs, empty-chunk negative case, ingestion inserts, and env-gated integration fixture covering chunk/cross-link persistence.
+
+
+## SP5 update: S3/MinIO storage integration
+- Upgraded storage service to support bucket-aware `put_text` and `get_text` methods and explicit storage configuration object.
+- Ingestion now persists raw source text into `S3_BUCKET_RAW`, normalized markdown into `S3_BUCKET_MARKDOWN`, and ingestion artifacts JSON into `S3_BUCKET_MARKDOWN` artifact paths.
+- Source version persistence now stores real S3 URIs (`s3_raw_uri`, `s3_markdown_uri`) produced by storage operations instead of placeholders.
+- Added unit tests for S3 put/get roundtrip and ingestion coverage for bucket usage, positive + negative scenarios; integration ingest fixture remains env-gated by `TEST_DATABASE_URL`.
+
+
+## SP6 update: Scoring trace & explainability
+- Added explicit scoring trace builder (`app/services/scoring_trace.py`) producing per-candidate fields: `lex_score`, `vec_score`, `rerank_score`, `boosts_applied`, `final_score`, `rank_position`, and `trace_id`.
+- `/v1/query` now includes `trace` object in API response and persists trace payload into `event_logs` with `API_RESPONSE`, plus stage-level `PIPELINE_STAGE` trace log event.
+- Updated response schema models to include typed trace structures (`QueryTrace`, `TraceScoreEntry`).
+- Added unit tests for trace schema fields (positive and negative/default scenarios).
+
+
+## SP7 update: Anti-hallucination guard hardening
+- Anti-hallucination verifier now performs sentence-level lexical + semantic checks with semantic similarity via `sentence_transformers` when available and deterministic fallback scoring when unavailable.
+- Added structured refusal envelope generation (`ONLY_SOURCES_VIOLATION`) and wired `/v1/query` to return a JSON refusal payload string in `answer` when unsupported content is detected.
+- Added tests for refusal payload schema and injected hallucination scenario asserting refusal behavior.
+
+
+## SP8 update: Performance instrumentation
+- Added performance utility module with derived stage budgets from env timeouts, budget exceed detection, and p95 summary helpers.
+- `/v1/query` now captures stage timings for parse, lexical, vector, rerank, total, llm, citations and logs budget exceed details with current perf and budgets.
+- Pipeline stage logging now includes timing payload for explainable performance traces.
+- Added unit tests for budget mapping/exceed detection and integration-style fixture test for p95 timing report generation.
+
+
+## SP9 update: Architecture drift detector upgrade
+- Replaced `scripts/drift_detector.py` with a structured drift analyzer that compares frozen architecture lists to code artifacts for endpoints, enums, env vars, and job status values (models + migrations).
+- Detector now emits a detailed JSON Drift Report with per-section `missing_in_code`, `extra_in_code`, and `ok` fields plus global `overall_ok`.
+- Added unit tests ensuring report structure and required sections are emitted.

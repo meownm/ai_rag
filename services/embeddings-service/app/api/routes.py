@@ -14,12 +14,12 @@ LOGGER = logging.getLogger(__name__)
 
 @lru_cache
 def get_encoder() -> EncoderService:
-    return EncoderService(settings.default_model_id)
+    return EncoderService(settings.OLLAMA_MODEL)
 
 
 @router.get("/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(version=settings.app_version)
+    return HealthResponse(version=settings.APP_VERSION)
 
 
 @router.post("/v1/embeddings", response_model=EmbeddingsResponse)
