@@ -33,3 +33,14 @@ poetry run alembic upgrade head
 poetry run uvicorn app.main:app --host 0.0.0.0 --port 8420
 curl -H "X-Conversation-Id: 11111111-1111-1111-1111-111111111111" http://localhost:8420/v1/query -d '{"query":"..."}'
 ```
+
+
+## Regression hardening flags
+
+- `MODEL_CONTEXT_WINDOW=8000`
+- `VERIFY_MODEL_NUM_CTX=true`
+- `MAX_CLARIFICATION_DEPTH=2`
+- `ENABLE_PER_STAGE_LATENCY_METRICS=true`
+- `CONFIDENCE_FALLBACK_THRESHOLD=0.3`
+
+Startup fails fast with `RH-MODEL-CONTEXT-MISMATCH` when context window is incompatible with provider/model limits.
