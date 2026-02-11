@@ -1,0 +1,336 @@
+openapi: 3.0.3
+info:
+  title: Corporate RAG Service API
+  version: 1.0.0
+servers:
+  - url: http://localhost:{port}
+    variables:
+      port:
+        default: '8100'
+tags:
+  - name: health
+  - name: query
+  - name: ingest
+  - name: jobs
+paths:
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getHealth
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /v1/query:
+    post:
+      tags: [query]
+      summary: Ask question with hybrid retrieval and reranking
+      operationId: postQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+      responses:
+        '200':
+          description: Answer returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/OnlySourcesViolation'
+        '429':
+          $ref: '#/components/responses/RateLimitedError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/ingest/sources/sync:
+    post:
+      tags: [ingest]
+      summary: Start source sync for tenant
+      operationId: startSourceSync
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceSyncRequest'
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobAcceptedResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /v1/jobs/{job_id}:
+    get:
+      tags: [jobs]
+      summary: Get job status
+      operationId: getJob
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: corporate-rag-service
+        version:
+          type: string
+    QueryRequest:
+      type: object
+      required: [tenant_id, query]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        query:
+          type: string
+        citations:
+          type: boolean
+          description: Optional override if tenant settings allow.
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+        filters:
+          type: object
+          additionalProperties: true
+    ScoreBreakdown:
+      type: object
+      required: [lex_score, vec_score, rerank_score, boosts, final_score]
+      properties:
+        lex_score:
+          type: number
+          format: float
+        vec_score:
+          type: number
+          format: float
+        rerank_score:
+          type: number
+          format: float
+        boosts:
+          type: object
+          additionalProperties:
+            type: number
+            format: float
+        final_score:
+          type: number
+          format: float
+    Citation:
+      type: object
+      required: [chunk_id, document_id, title, url, snippet]
+      properties:
+        chunk_id:
+          type: string
+          format: uuid
+        document_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        url:
+          type: string
+        snippet:
+          type: string
+        score_breakdown:
+          $ref: '#/components/schemas/ScoreBreakdown'
+    QueryResponse:
+      type: object
+      required: [answer, only_sources_verdict, correlation_id]
+      properties:
+        answer:
+          type: string
+        only_sources_verdict:
+          type: string
+          enum: [PASS, FAIL]
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+        correlation_id:
+          type: string
+          format: uuid
+    SourceSyncRequest:
+      type: object
+      required: [tenant_id, source_types]
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        source_types:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [CONFLUENCE_PAGE, CONFLUENCE_ATTACHMENT, FILE_CATALOG_OBJECT]
+        force_reindex:
+          type: boolean
+          default: false
+    JobAcceptedResponse:
+      type: object
+      required: [job_id, job_status]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        job_status:
+          type: string
+          enum: [QUEUED]
+    JobStatusResponse:
+      type: object
+      required: [job_id, tenant_id, job_type, job_status, requested_by, started_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+          format: uuid
+        job_type:
+          type: string
+          enum: [SYNC_CONFLUENCE, SYNC_FILE_CATALOG, PREPROCESS, INDEX_LEXICAL, INDEX_VECTOR, REINDEX_ALL]
+        job_status:
+          type: string
+          enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, PARTIAL_SUCCESS]
+        requested_by:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          $ref: '#/components/schemas/ErrorEnvelope'
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, correlation_id, retryable, timestamp]
+          properties:
+            code:
+              type: string
+              enum:
+                - AUTH_UNAUTHORIZED
+                - AUTH_FORBIDDEN_TENANT
+                - TENANT_NOT_FOUND
+                - SOURCE_NOT_FOUND
+                - SOURCE_FETCH_FAILED
+                - NORMALIZATION_FAILED
+                - CHUNKING_FAILED
+                - EMBEDDINGS_HTTP_ERROR
+                - EMBEDDINGS_TIMEOUT
+                - VECTOR_INDEX_ERROR
+                - LEXICAL_INDEX_ERROR
+                - RERANKER_ERROR
+                - ONLY_SOURCES_VIOLATION
+                - LLM_PROVIDER_ERROR
+                - VALIDATION_ERROR
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+            correlation_id:
+              type: string
+              format: uuid
+            retryable:
+              type: boolean
+            timestamp:
+              type: string
+              format: date-time
+  responses:
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    UnauthorizedError:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ForbiddenError:
+      description: Forbidden
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFoundError:
+      description: Not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimitedError:
+      description: Rate limited
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    OnlySourcesViolation:
+      description: Only sources guard violation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: Internal error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
