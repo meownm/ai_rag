@@ -19,7 +19,21 @@ def test_build_scoring_trace_contains_required_fields_positive():
 
     assert trace["trace_id"] == "trace-123"
     entry = trace["scoring_trace"][0]
-    assert set(["lex_score", "vec_score", "rerank_score", "boosts_applied", "final_score", "rank_position", "chunk_id"]).issubset(entry)
+    assert set([
+        "lex_score",
+        "vec_score",
+        "rerank_score",
+        "lex_raw",
+        "lex_norm",
+        "vec_raw",
+        "vec_norm",
+        "rerank_raw",
+        "rerank_norm",
+        "boosts_applied",
+        "final_score",
+        "rank_position",
+        "chunk_id",
+    ]).issubset(entry)
 
 
 def test_build_scoring_trace_negative_defaults_when_missing():
@@ -28,4 +42,10 @@ def test_build_scoring_trace_negative_defaults_when_missing():
     assert entry["lex_score"] == 0.0
     assert entry["vec_score"] == 0.0
     assert entry["rerank_score"] == 0.0
+    assert entry["lex_raw"] == 0.0
+    assert entry["lex_norm"] == 0.0
+    assert entry["vec_raw"] == 0.0
+    assert entry["vec_norm"] == 0.0
+    assert entry["rerank_raw"] == 0.0
+    assert entry["rerank_norm"] == 0.0
     assert entry["boosts_applied"] == []

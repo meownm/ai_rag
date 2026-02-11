@@ -74,21 +74,21 @@ class TenantRepository:
     def _to_vector_literal(query_embedding: list[float]) -> str:
         return "[" + ",".join(f"{float(x):.8f}" for x in query_embedding) + "]"
 
-    def fetch_vector_candidates(self, query_embedding: list[float], top_n: int) -> list[dict]:
+    def fetch_vector_candidates_by_similarity(self, query_embedding: list[float], top_n: int) -> list[dict]:
         vector_literal = self._to_vector_literal(query_embedding)
         rows = self.db.execute(
             text(
                 """
                 SELECT cv.chunk_id::text AS chunk_id,
-                       (cv.embedding <=> CAST(:qvec AS vector)) AS distance,
-                       (1.0 / (1.0 + (cv.embedding <=> CAST(:qvec AS vector)))) AS vec_score
+                       (cv.embedding <-> CAST(:qvec AS vector)) AS distance,
+                       (1.0 / (1.0 + (cv.embedding <-> CAST(:qvec AS vector)))) AS vec_score
                 FROM chunk_vectors cv
                 JOIN chunks c ON c.chunk_id = cv.chunk_id
                 JOIN documents d ON d.document_id = c.document_id
                 WHERE cv.tenant_id = CAST(:tenant_id AS uuid)
                   AND c.tenant_id = CAST(:tenant_id AS uuid)
                   AND d.tenant_id = CAST(:tenant_id AS uuid)
-                ORDER BY cv.embedding <=> CAST(:qvec AS vector)
+                ORDER BY cv.embedding <-> CAST(:qvec AS vector)
                 LIMIT :limit_n
                 """
             ),
@@ -102,6 +102,39 @@ class TenantRepository:
             }
             for row in rows
         ]
+
+    def fetch_vector_candidates_by_ordinal(self, top_n: int) -> list[dict]:
+        rows = self.db.execute(
+            text(
+                """
+                SELECT cv.chunk_id::text AS chunk_id,
+                       0.0 AS distance,
+                       0.0 AS vec_score
+                FROM chunk_vectors cv
+                JOIN chunks c ON c.chunk_id = cv.chunk_id
+                JOIN documents d ON d.document_id = c.document_id
+                WHERE cv.tenant_id = CAST(:tenant_id AS uuid)
+                  AND c.tenant_id = CAST(:tenant_id AS uuid)
+                  AND d.tenant_id = CAST(:tenant_id AS uuid)
+                ORDER BY c.ordinal ASC
+                LIMIT :limit_n
+                """
+            ),
+            {"tenant_id": self.tenant_id, "limit_n": top_n},
+        ).mappings().all()
+        return [
+            {
+                "chunk_id": row["chunk_id"],
+                "distance": float(row["distance"] or 0.0),
+                "vec_score": float(row["vec_score"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def fetch_vector_candidates(self, query_embedding: list[float], top_n: int, use_similarity: bool = False) -> list[dict]:
+        if use_similarity:
+            return self.fetch_vector_candidates_by_similarity(query_embedding, top_n)
+        return self.fetch_vector_candidates_by_ordinal(top_n)
 
     def hydrate_candidates(self, chunk_ids: set[str], lexical_scores: dict[str, float], vector_scores: dict[str, float] | None = None) -> list[dict]:
         if not chunk_ids:
@@ -128,23 +161,23 @@ class TenantRepository:
             for chunk, document, vector in rows
         ]
 
-    def fetch_neighbors(self, base_chunks: list[dict], cap: int) -> list[dict]:
-        if not base_chunks or cap <= 0:
+    def fetch_neighbors(self, base_chunks: list[dict], cap: int, window: int = 1) -> list[dict]:
+        if not base_chunks or cap <= 0 or window < 1:
             return []
         by_doc: dict[str, set[int]] = {}
-        base_info: dict[str, dict] = {}
+        base_chunks_by_doc: dict[str, list[dict]] = {}
         for c in base_chunks:
             doc_id = str(c["document_id"])
             ordinal = int(c.get("ordinal", 0))
-            by_doc.setdefault(doc_id, set()).update({ordinal - 1, ordinal + 1})
-            base_info[str(c["chunk_id"])] = c
+            window_ordinals = range(ordinal - window, ordinal + window + 1)
+            by_doc.setdefault(doc_id, set()).update(window_ordinals)
+            base_chunks_by_doc.setdefault(doc_id, []).append(c)
 
         neighbors: list[dict] = []
         seen = {str(c["chunk_id"]) for c in base_chunks}
-        for base in base_chunks:
+        for doc_id, ordinals in by_doc.items():
             if len(neighbors) >= cap:
                 break
-            ordinals = by_doc.get(str(base["document_id"]), set())
             rows = (
                 self.db.query(Chunks, Documents, ChunkVectors)
                 .join(Documents, Documents.document_id == Chunks.document_id)
@@ -152,18 +185,22 @@ class TenantRepository:
                 .filter(Chunks.tenant_id == self.tenant_id)
                 .filter(Documents.tenant_id == self.tenant_id)
                 .filter(ChunkVectors.tenant_id == self.tenant_id)
-                .filter(Chunks.document_id == base["document_id"])
+                .filter(Chunks.document_id == doc_id)
                 .filter(Chunks.ordinal.in_(ordinals))
+                .order_by(Chunks.ordinal.asc())
                 .all()
             )
-            prev_rows = sorted([r for r in rows if r[0].ordinal == int(base.get("ordinal", 0)) - 1], key=lambda r: r[0].ordinal)
-            next_rows = sorted([r for r in rows if r[0].ordinal == int(base.get("ordinal", 0)) + 1], key=lambda r: r[0].ordinal)
-            for row in [*prev_rows, *next_rows]:
+            for row in rows:
                 chunk, document, vector = row
                 chunk_id = str(chunk.chunk_id)
                 if chunk_id in seen:
                     continue
                 seen.add(chunk_id)
+
+                base_matches = base_chunks_by_doc.get(doc_id, [])
+                if not base_matches:
+                    continue
+                base = min(base_matches, key=lambda b: abs(int(b.get("ordinal", 0)) - int(chunk.ordinal)))
                 base_score = float(base.get("final_score", 0.0))
                 candidate = self._row_to_candidate(chunk, document, vector, 0.0, max(0.0, float(base.get("vec_score", 0.0)) * 0.95))
                 candidate["rerank_score"] = float(base.get("rerank_score", 0.0)) * 0.95

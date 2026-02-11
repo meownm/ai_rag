@@ -43,6 +43,12 @@ class TraceScoreEntry(BaseModel):
     lex_score: float
     vec_score: float
     rerank_score: float
+    lex_raw: float | None = None
+    lex_norm: float | None = None
+    vec_raw: float | None = None
+    vec_norm: float | None = None
+    rerank_raw: float | None = None
+    rerank_norm: float | None = None
     boosts_applied: list[dict[str, Any]]
     final_score: float
     rank_position: int

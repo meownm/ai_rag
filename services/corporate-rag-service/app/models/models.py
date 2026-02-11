@@ -68,6 +68,11 @@ class Chunks(Base):
     chunk_text: Mapped[str] = mapped_column(Text)
     token_count: Mapped[int] = mapped_column(Integer)
     ordinal: Mapped[int] = mapped_column(Integer)
+    chunk_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    block_start_idx: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    block_end_idx: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ChunkVectors(Base):

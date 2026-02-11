@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     EMBEDDINGS_SERVICE_PORT: int = 8200
     OLLAMA_MODEL: str = "BAAI/bge-small-en-v1.5"
+    EMBEDDING_DIM: int = 1024
+    EMBEDDINGS_DEFAULT_MODEL_ID: str = "bge-m3"
 
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432

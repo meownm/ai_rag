@@ -8,10 +8,18 @@ class EmbeddingsClient:
         self.base_url = str(base_url).rstrip("/")
         self.timeout_seconds = float(timeout_seconds)
 
-    def embed_text(self, text: str, tenant_id: str | None = None, correlation_id: str | None = None) -> list[float]:
+    def embed_texts(
+        self,
+        texts: list[str],
+        model_id: str = "bge-m3",
+        tenant_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> list[list[float]]:
+        if not texts:
+            return []
         payload = {
-            "model": "bge-m3",
-            "input": [text],
+            "model": model_id,
+            "input": texts,
             "encoding_format": "float",
         }
         if tenant_id is not None:
@@ -27,4 +35,21 @@ class EmbeddingsClient:
         data = body["data"]
         if not data:
             raise RuntimeError("Embeddings service returned empty data")
-        return data[0]["embedding"]
+        return [item["embedding"] for item in data]
+
+    def embed_text(
+        self,
+        text: str,
+        tenant_id: str | None = None,
+        correlation_id: str | None = None,
+        model_id: str = "bge-m3",
+    ) -> list[float]:
+        embeddings = self.embed_texts(
+            [text],
+            model_id=model_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+        if not embeddings:
+            raise RuntimeError("Embeddings service returned empty data")
+        return embeddings[0]

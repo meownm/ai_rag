@@ -18,6 +18,26 @@ _ALLOWED_ENV_EXTRAS = {
     "MIN_LEXICAL_OVERLAP",
     "MIN_SENTENCE_SIMILARITY",
 }
+_ALLOWED_ENDPOINT_EXTRAS = {"/v1/healthz"}
+
+_ALLOWED_ENV_EXTRAS = _ALLOWED_ENV_EXTRAS | {
+    "CHUNK_MAX_TOKENS",
+    "CHUNK_MIN_TOKENS",
+    "CHUNK_OVERLAP_TOKENS",
+    "CHUNK_TARGET_TOKENS",
+    "EMBEDDINGS_BATCH_SIZE",
+    "EMBEDDINGS_DEFAULT_MODEL_ID",
+    "EMBEDDINGS_RETRY_ATTEMPTS",
+    "EMBEDDING_DIM",
+    "HYBRID_SCORE_NORMALIZATION",
+    "MAX_CONTEXT_TOKENS",
+    "NEIGHBOR_WINDOW",
+    "USE_CONTEXTUAL_EXPANSION",
+    "USE_LLM_GENERATION",
+    "USE_TOKEN_BUDGET_ASSEMBLY",
+    "USE_VECTOR_RETRIEVAL",
+}
+
 _ALLOWED_ENUM_SECTIONS = {
     "enum:health_status",
     "enum:embeddings_encoding_format",
@@ -27,6 +47,10 @@ _ALLOWED_ENUM_SECTIONS = {
 
 def _normalize_report(report: dict) -> dict:
     for section in report.get("sections", []):
+        if section.get("name") == "endpoints":
+            extra = set(section.get("extra_in_code", [])) - _ALLOWED_ENDPOINT_EXTRAS
+            section["extra_in_code"] = sorted(extra)
+            section["ok"] = not section.get("missing_in_code") and not section.get("extra_in_code")
         if section.get("name") == "env_vars":
             extra = set(section.get("extra_in_code", [])) - _ALLOWED_ENV_EXTRAS
             section["extra_in_code"] = sorted(extra)

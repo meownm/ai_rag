@@ -1,6 +1,8 @@
 import hashlib
 import json
+import logging
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,6 +13,11 @@ from app.cli.fts_rebuild import weighted_fts_expression
 from app.services.storage import ObjectStorage, StorageConfig
 
 Session = Any
+LOGGER = logging.getLogger(__name__)
+
+
+class EmbeddingIndexingError(Exception):
+    pass
 
 
 @dataclass
@@ -72,6 +79,15 @@ def _load_settings():
             S3_SECURE = False
             S3_BUCKET_RAW = "rag-raw"
             S3_BUCKET_MARKDOWN = "rag-markdown"
+            EMBEDDINGS_SERVICE_URL = "http://localhost:8200"
+            EMBEDDINGS_TIMEOUT_SECONDS = 30
+            EMBEDDINGS_BATCH_SIZE = 64
+            EMBEDDINGS_RETRY_ATTEMPTS = 3
+            EMBEDDINGS_DEFAULT_MODEL_ID = "bge-m3"
+            CHUNK_TARGET_TOKENS = 650
+            CHUNK_MAX_TOKENS = 900
+            CHUNK_MIN_TOKENS = 120
+            CHUNK_OVERLAP_TOKENS = 80
 
         return _Fallback()
 
@@ -94,6 +110,7 @@ def normalize_to_markdown(content: str) -> str:
     return re.sub(r"[ \t]+", " ", normalized)
 
 
+
 def extract_links(markdown: str) -> list[str]:
     return re.findall(r"\[[^\]]+\]\(([^)]+)\)", markdown)
 
@@ -106,43 +123,227 @@ def _token_count(text: str) -> int:
     return len([t for t in text.split() if t])
 
 
-def chunk_markdown(markdown: str, target_tokens: int = 350, hard_max_tokens: int = 520) -> list[tuple[str, str]]:
-    headings: list[str] = []
-    chunks: list[tuple[str, str]] = []
-    buf: list[str] = []
+def _line_type(line: str, in_code_block: bool) -> str:
+    stripped = line.strip()
+    if stripped.startswith("```"):
+        return "code"
+    if in_code_block:
+        return "code"
+    if not stripped:
+        return "blank"
+    if re.match(r"^#{1,6}\s", stripped):
+        return "heading"
+    if re.match(r"^>\s?", stripped):
+        return "quote"
+    if re.match(r"^[-*+]\s+", stripped) or re.match(r"^\d+\.\s+", stripped):
+        return "list"
+    if "|" in stripped and stripped.count("|") >= 2:
+        return "table"
+    return "paragraph"
 
-    def flush() -> None:
-        if not buf:
+
+def _parse_markdown_blocks(markdown: str) -> list[dict[str, Any]]:
+    lines = markdown.splitlines(keepends=True)
+    blocks: list[dict[str, Any]] = []
+    headings_path: list[str] = []
+    in_code_block = False
+
+    current_type: str | None = None
+    current_lines: list[str] = []
+    current_start = 0
+    current_path: list[str] = []
+    offset = 0
+
+    def flush(end_pos: int) -> None:
+        nonlocal current_type, current_lines, current_start, current_path
+        if not current_type or not current_lines:
+            current_type = None
+            current_lines = []
             return
-        text_block = "\n".join(buf).strip()
-        if text_block:
-            chunks.append(("/".join(headings), text_block))
-        buf.clear()
+        text = "".join(current_lines).strip()
+        if text:
+            blocks.append(
+                {
+                    "type": current_type,
+                    "text": text,
+                    "char_start": current_start,
+                    "char_end": end_pos,
+                    "token_estimate": _token_count(text),
+                    "headings_path": list(current_path),
+                }
+            )
+        current_type = None
+        current_lines = []
 
-    for line in markdown.split("\n"):
-        if line.startswith("#"):
-            flush()
-            level = len(line) - len(line.lstrip("#"))
-            title = line[level:].strip()
-            headings[:] = headings[: max(level - 1, 0)]
-            headings.append(title)
+    for line in lines:
+        line_start = offset
+        offset += len(line)
+        line_t = _line_type(line, in_code_block)
+
+        if line.strip().startswith("```"):
+            if in_code_block and current_type == "code":
+                current_lines.append(line)
+                flush(offset)
+                in_code_block = False
+                continue
+            in_code_block = True
+            if current_type not in (None, "code"):
+                flush(line_start)
+            if current_type is None:
+                current_type = "code"
+                current_start = line_start
+                current_path = list(headings_path)
+            current_lines.append(line)
             continue
-        buf.append(line)
-        if _token_count(" ".join(buf)) >= target_tokens:
-            flush()
 
-    flush()
-
-    final_chunks: list[tuple[str, str]] = []
-    for path, chunk_text in chunks:
-        words = chunk_text.split()
-        if len(words) <= hard_max_tokens:
-            final_chunks.append((path, chunk_text))
+        if line_t == "heading":
+            flush(line_start)
+            heading_level = len(line) - len(line.lstrip("#"))
+            heading_title = line[heading_level:].strip()
+            headings_path[:] = headings_path[: max(heading_level - 1, 0)]
+            headings_path.append(heading_title)
             continue
-        step = int(hard_max_tokens * 0.85)
-        for i in range(0, len(words), step):
-            final_chunks.append((path, " ".join(words[i : i + hard_max_tokens])))
-    return final_chunks
+
+        if line_t == "blank":
+            flush(line_start)
+            continue
+
+        if current_type is None:
+            current_type = line_t
+            current_start = line_start
+            current_path = list(headings_path)
+            current_lines = [line]
+            continue
+
+        if current_type == line_t and current_path == headings_path:
+            current_lines.append(line)
+            continue
+
+        flush(line_start)
+        current_type = line_t
+        current_start = line_start
+        current_path = list(headings_path)
+        current_lines = [line]
+
+    flush(offset)
+    return blocks
+
+
+def _split_large_block(
+    *,
+    text: str,
+    block_type: str,
+    headings_path: list[str],
+    char_start: int,
+    char_end: int,
+    block_idx: int,
+    max_tokens: int,
+    overlap_tokens: int,
+) -> list[dict[str, Any]]:
+    words = text.split()
+    if not words:
+        return []
+    if block_type in {"table", "list", "code", "quote"}:
+        overlap = 0
+    else:
+        overlap = max(0, min(overlap_tokens, max_tokens - 1))
+    step = max(1, max_tokens - overlap)
+
+    chunks: list[dict[str, Any]] = []
+    for i in range(0, len(words), step):
+        piece_words = words[i : i + max_tokens]
+        if not piece_words:
+            break
+        piece = " ".join(piece_words)
+        chunks.append(
+            {
+                "chunk_type": "mixed" if block_type == "paragraph" else block_type,
+                "chunk_path": "/".join(headings_path),
+                "chunk_text": piece,
+                "token_count": len(piece_words),
+                "char_start": char_start,
+                "char_end": char_end,
+                "block_start_idx": block_idx,
+                "block_end_idx": block_idx,
+            }
+        )
+        if i + max_tokens >= len(words):
+            break
+    return chunks
+
+
+def chunk_markdown(
+    markdown: str,
+    *,
+    target_tokens: int = 650,
+    max_tokens: int = 900,
+    min_tokens: int = 120,
+    overlap_tokens: int = 80,
+) -> list[dict[str, Any]]:
+    blocks = _parse_markdown_blocks(markdown)
+    if not blocks:
+        return []
+
+    built: list[dict[str, Any]] = []
+    current_blocks: list[tuple[int, dict[str, Any]]] = []
+    current_tokens = 0
+
+    def flush(force: bool = False) -> None:
+        nonlocal current_blocks, current_tokens
+        if not current_blocks:
+            return
+        if not force and current_tokens < max(min_tokens, 1):
+            return
+
+        block_types = [b[1]["type"] for b in current_blocks]
+        if len(set(block_types)) == 1:
+            chunk_type = block_types[0]
+        else:
+            chunk_type = "mixed"
+        built.append(
+            {
+                "chunk_type": chunk_type,
+                "chunk_path": "/".join(current_blocks[0][1]["headings_path"]),
+                "chunk_text": "\n".join(b[1]["text"] for b in current_blocks).strip(),
+                "token_count": current_tokens,
+                "char_start": current_blocks[0][1]["char_start"],
+                "char_end": current_blocks[-1][1]["char_end"],
+                "block_start_idx": current_blocks[0][0],
+                "block_end_idx": current_blocks[-1][0],
+            }
+        )
+        current_blocks = []
+        current_tokens = 0
+
+    for idx, block in enumerate(blocks):
+        b_tokens = int(block["token_estimate"])
+        if b_tokens > max_tokens:
+            flush(force=True)
+            built.extend(
+                _split_large_block(
+                    text=block["text"],
+                    block_type=block["type"],
+                    headings_path=block["headings_path"],
+                    char_start=int(block["char_start"]),
+                    char_end=int(block["char_end"]),
+                    block_idx=idx,
+                    max_tokens=max_tokens,
+                    overlap_tokens=overlap_tokens,
+                )
+            )
+            continue
+
+        would_be = current_tokens + b_tokens
+        if current_blocks and would_be > max_tokens and current_tokens >= min_tokens:
+            flush(force=True)
+
+        current_blocks.append((idx, block))
+        current_tokens += b_tokens
+        if current_tokens >= target_tokens:
+            flush(force=True)
+
+    flush(force=True)
+    return built
 
 
 def stable_chunk_id(tenant_id: uuid.UUID, document_id: uuid.UUID, source_version_id: uuid.UUID, ordinal: int, chunk_text: str) -> uuid.UUID:
@@ -216,15 +417,32 @@ def _insert_document(db: Session, tenant_id: uuid.UUID, source_id: uuid.UUID, so
 
 
 def _insert_chunks(db: Session, tenant_id: uuid.UUID, document_id: uuid.UUID, source_version_id: uuid.UUID, markdown: str) -> list[uuid.UUID]:
+    cfg = _load_settings()
+    chunk_defs = chunk_markdown(
+        markdown,
+        target_tokens=int(getattr(cfg, "CHUNK_TARGET_TOKENS", 650)),
+        max_tokens=int(getattr(cfg, "CHUNK_MAX_TOKENS", 900)),
+        min_tokens=int(getattr(cfg, "CHUNK_MIN_TOKENS", 120)),
+        overlap_tokens=int(getattr(cfg, "CHUNK_OVERLAP_TOKENS", 80)),
+    )
+
     chunk_ids: list[uuid.UUID] = []
-    for ordinal, (chunk_path, chunk_text) in enumerate(chunk_markdown(markdown)):
+    for ordinal, chunk in enumerate(chunk_defs):
+        chunk_path = str(chunk.get("chunk_path", ""))
+        chunk_text = str(chunk.get("chunk_text", ""))
         chunk_id = stable_chunk_id(tenant_id, document_id, source_version_id, ordinal, chunk_text)
         chunk_ids.append(chunk_id)
         db.execute(
             _sql(
                 """
-                INSERT INTO chunks (chunk_id, document_id, tenant_id, chunk_path, chunk_text, token_count, ordinal)
-                VALUES (:chunk_id, :document_id, :tenant_id, :chunk_path, :chunk_text, :token_count, :ordinal)
+                INSERT INTO chunks (
+                    chunk_id, document_id, tenant_id, chunk_path, chunk_text, token_count, ordinal,
+                    chunk_type, char_start, char_end, block_start_idx, block_end_idx
+                )
+                VALUES (
+                    :chunk_id, :document_id, :tenant_id, :chunk_path, :chunk_text, :token_count, :ordinal,
+                    :chunk_type, :char_start, :char_end, :block_start_idx, :block_end_idx
+                )
                 """
             ),
             {
@@ -233,8 +451,13 @@ def _insert_chunks(db: Session, tenant_id: uuid.UUID, document_id: uuid.UUID, so
                 "tenant_id": tenant_id,
                 "chunk_path": chunk_path,
                 "chunk_text": chunk_text,
-                "token_count": _token_count(chunk_text),
+                "token_count": int(chunk.get("token_count", _token_count(chunk_text))),
                 "ordinal": ordinal,
+                "chunk_type": str(chunk.get("chunk_type", "mixed")),
+                "char_start": int(chunk.get("char_start", 0)),
+                "char_end": int(chunk.get("char_end", 0)),
+                "block_start_idx": int(chunk.get("block_start_idx", 0)),
+                "block_end_idx": int(chunk.get("block_end_idx", 0)),
             },
         )
     return chunk_ids
@@ -290,49 +513,132 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
     if not chunk_ids:
         return
     cfg = _load_settings()
-    batch_size = int(getattr(cfg, "MAX_EMBED_BATCH_SIZE", 64))
+    batch_size = int(getattr(cfg, "EMBEDDINGS_BATCH_SIZE", 64))
+    retry_attempts = int(getattr(cfg, "EMBEDDINGS_RETRY_ATTEMPTS", 3))
+    model_id = str(getattr(cfg, "EMBEDDINGS_DEFAULT_MODEL_ID", "bge-m3"))
     client = EmbeddingsClient(getattr(cfg, "EMBEDDINGS_SERVICE_URL", None), getattr(cfg, "EMBEDDINGS_TIMEOUT_SECONDS", 30))
 
     query_result = db.execute(
-        _sql("SELECT chunk_id, chunk_text FROM chunks WHERE tenant_id = :tenant_id AND chunk_id = ANY(:chunk_ids) ORDER BY ordinal"),
+        _sql(
+            """
+            SELECT c.chunk_id, c.chunk_text
+            FROM chunks c
+            LEFT JOIN chunk_vectors cv ON cv.chunk_id = c.chunk_id
+            WHERE c.tenant_id = :tenant_id
+              AND c.chunk_id = ANY(:chunk_ids)
+              AND cv.chunk_id IS NULL
+            ORDER BY c.ordinal
+            """
+        ),
         {"tenant_id": tenant_id, "chunk_ids": chunk_ids},
     )
     if not hasattr(query_result, "mappings"):
         return
     rows = query_result.mappings().all()
 
+    vectors_indexed_count = 0
+    batch_count = 0
+    start_all = time.perf_counter()
+
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
         t0 = datetime.now(timezone.utc)
-        try:
-            for row in batch:
-                _log_ingest_event(db, tenant_id, "EMBEDDINGS_REQUEST", {"chunk_id": str(row["chunk_id"]), "model": "bge-m3"})
-                emb = client.embed_text(str(row["chunk_text"]), tenant_id=str(tenant_id), correlation_id=str(uuid.uuid4()))
-                _log_ingest_event(db, tenant_id, "EMBEDDINGS_RESPONSE", {"chunk_id": str(row["chunk_id"]), "dimensions": len(emb)})
-                db.execute(
-                    _sql(
-                        """
-                        INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim)
-                        VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim)
-                        ON CONFLICT (chunk_id) DO UPDATE
-                        SET tenant_id = EXCLUDED.tenant_id,
-                            embedding_model = EXCLUDED.embedding_model,
-                            embedding = EXCLUDED.embedding,
-                            embedding_dim = EXCLUDED.embedding_dim
-                        """
-                    ),
-                    {
-                        "chunk_id": row["chunk_id"],
-                        "tenant_id": tenant_id,
-                        "embedding_model": "bge-m3",
-                        "embedding": "[" + ",".join(f"{float(x):.8f}" for x in emb) + "]",
-                        "embedding_dim": len(emb),
-                    },
+        texts = [str(row["chunk_text"]) for row in batch]
+        correlation_id = str(uuid.uuid4())
+        _log_ingest_event(
+            db,
+            tenant_id,
+            "EMBEDDINGS_REQUEST",
+            {
+                "model": model_id,
+                "batch_size": len(batch),
+                "chunk_ids": [str(row["chunk_id"]) for row in batch],
+            },
+        )
+
+        last_exc: Exception | None = None
+        embeddings: list[list[float]] | None = None
+        for attempt in range(1, max(retry_attempts, 1) + 1):
+            try:
+                embeddings = client.embed_texts(
+                    texts,
+                    model_id=model_id,
+                    tenant_id=str(tenant_id),
+                    correlation_id=correlation_id,
                 )
-            elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
-            _log_ingest_event(db, tenant_id, "PIPELINE_STAGE", {"stage": "INDEX_VECTOR", "batch_size": len(batch), "duration_ms": elapsed_ms})
-        except Exception as exc:  # noqa: BLE001
-            _log_ingest_event(db, tenant_id, "ERROR", {"code": "VECTOR_INDEX_ERROR", "message": str(exc), "batch_start": i})
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < max(retry_attempts, 1):
+                    delay_seconds = min(2 ** (attempt - 1), 8)
+                    time.sleep(delay_seconds)
+
+        if embeddings is None:
+            _log_ingest_event(
+                db,
+                tenant_id,
+                "ERROR",
+                {
+                    "code": "S-EMB-INDEX-FAILED",
+                    "message": str(last_exc),
+                    "batch_start": i,
+                    "attempts": max(retry_attempts, 1),
+                },
+            )
+            raise EmbeddingIndexingError("S-EMB-INDEX-FAILED") from last_exc
+
+        if len(embeddings) != len(batch):
+            raise EmbeddingIndexingError("S-EMB-INDEX-FAILED")
+
+        for row, emb in zip(batch, embeddings):
+            db.execute(
+                _sql(
+                    """
+                    INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim)
+                    VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim)
+                    ON CONFLICT (chunk_id) DO UPDATE
+                    SET tenant_id = EXCLUDED.tenant_id,
+                        embedding_model = EXCLUDED.embedding_model,
+                        embedding = EXCLUDED.embedding,
+                        embedding_dim = EXCLUDED.embedding_dim,
+                        updated_at = now()
+                    """
+                ),
+                {
+                    "chunk_id": row["chunk_id"],
+                    "tenant_id": tenant_id,
+                    "embedding_model": model_id,
+                    "embedding": "[" + ",".join(f"{float(x):.8f}" for x in emb) + "]",
+                    "embedding_dim": len(emb),
+                },
+            )
+        elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+        _log_ingest_event(
+            db,
+            tenant_id,
+            "EMBEDDINGS_RESPONSE",
+            {
+                "model": model_id,
+                "batch_size": len(batch),
+                "duration_ms": elapsed_ms,
+                "indexed_count": len(batch),
+            },
+        )
+        _log_ingest_event(db, tenant_id, "PIPELINE_STAGE", {"stage": "INDEX_VECTOR", "batch_size": len(batch), "duration_ms": elapsed_ms})
+        vectors_indexed_count += len(batch)
+        batch_count += 1
+
+    duration_ms = int((time.perf_counter() - start_all) * 1000)
+    LOGGER.info(
+        "embeddings_indexing_completed",
+        extra={
+            "request_id": None,
+            "tenant_id": str(tenant_id),
+            "vectors_indexed_count": vectors_indexed_count,
+            "batch_count": batch_count,
+            "duration_ms": duration_ms,
+        },
+    )
 
 
 def _upsert_fts_for_chunks(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uuid.UUID]) -> None:

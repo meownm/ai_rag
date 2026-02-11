@@ -1,6 +1,8 @@
 import uuid
 
-from app.services.ingestion import SourceItem, chunk_markdown, ingest_sources_sync, stable_chunk_id
+import pytest
+
+from app.services.ingestion import EmbeddingIndexingError, SourceItem, _upsert_chunk_vectors, chunk_markdown, ingest_sources_sync, stable_chunk_id
 
 
 class FakeMappings:
@@ -29,7 +31,7 @@ class FakeDb:
         stmt = str(statement)
         payload = params or {}
         self.calls.append((stmt, payload))
-        if "SELECT chunk_id, chunk_text FROM chunks" in stmt:
+        if "SELECT c.chunk_id, c.chunk_text" in stmt and "LEFT JOIN chunk_vectors" in stmt:
             chunk_ids = payload.get("chunk_ids", [])
             return FakeResult([{"chunk_id": cid, "chunk_text": "chunk text"} for cid in chunk_ids])
         return FakeResult()
@@ -95,8 +97,8 @@ def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive(monkeypat
         def __init__(self, *_args, **_kwargs):
             pass
 
-        def embed_text(self, *_args, **_kwargs):
-            return [0.1, 0.2, 0.3]
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
 
     monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
 
@@ -134,3 +136,126 @@ def test_ingest_sources_sync_negative_unknown_source_type_no_data():
     assert result == {"documents": 0, "chunks": 0, "cross_links": 0, "artifacts": 0}
     assert db.calls == []
     assert storage.put_calls == []
+
+
+def test_upsert_chunk_vectors_retries_then_succeeds(monkeypatch):
+    db = FakeDb()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    calls = {"n": 0}
+
+    class RetryEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("temporary")
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    class FakeSettings:
+        EMBEDDINGS_BATCH_SIZE = 2
+        EMBEDDINGS_RETRY_ATTEMPTS = 3
+        EMBEDDINGS_DEFAULT_MODEL_ID = "bge-m3"
+        EMBEDDINGS_SERVICE_URL = "http://localhost:8200"
+        EMBEDDINGS_TIMEOUT_SECONDS = 30
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", RetryEmbeddingsClient)
+    monkeypatch.setattr("app.services.ingestion._load_settings", lambda: FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.time.sleep", lambda *_args, **_kwargs: None)
+
+    chunk_ids = [uuid.uuid4(), uuid.uuid4(), uuid.uuid4()]
+    _upsert_chunk_vectors(db, tenant, chunk_ids)
+
+    assert calls["n"] == 3
+    sql_text = "\n".join(call[0] for call in db.calls)
+    assert "LEFT JOIN chunk_vectors" in sql_text
+    assert "ON CONFLICT (chunk_id) DO UPDATE" in sql_text
+
+
+def test_upsert_chunk_vectors_raises_after_retries_exhausted(monkeypatch):
+    db = FakeDb()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    class AlwaysFailEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            raise RuntimeError("down")
+
+    class FakeSettings:
+        EMBEDDINGS_BATCH_SIZE = 2
+        EMBEDDINGS_RETRY_ATTEMPTS = 2
+        EMBEDDINGS_DEFAULT_MODEL_ID = "bge-m3"
+        EMBEDDINGS_SERVICE_URL = "http://localhost:8200"
+        EMBEDDINGS_TIMEOUT_SECONDS = 30
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", AlwaysFailEmbeddingsClient)
+    monkeypatch.setattr("app.services.ingestion._load_settings", lambda: FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.time.sleep", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(EmbeddingIndexingError):
+        _upsert_chunk_vectors(db, tenant, [uuid.uuid4()])
+
+
+def test_chunk_markdown_respects_min_max_and_overlap_positive():
+    text = "# H1\n" + ("alpha " * 1000)
+    chunks = chunk_markdown(text, target_tokens=650, max_tokens=900, min_tokens=120, overlap_tokens=80)
+
+    assert len(chunks) >= 2
+    assert all(c["token_count"] <= 900 for c in chunks)
+    # overlap for paragraph/mixed keeps repeated boundary tokens
+    first_tail = chunks[0]["chunk_text"].split()[-5:]
+    second_head = chunks[1]["chunk_text"].split()[:5]
+    assert first_tail == second_head
+
+
+def test_chunk_markdown_contract_boundaries_positive():
+    markdown = """# Policy
+
+Paragraph one sentence.
+
+- item one
+- item two
+
+> quoted text
+
+```
+code line
+```
+"""
+    chunks = chunk_markdown(markdown, target_tokens=20, max_tokens=40, min_tokens=1, overlap_tokens=5)
+
+    assert chunks
+    assert all("chunk_type" in c for c in chunks)
+    assert all(c["char_end"] >= c["char_start"] for c in chunks)
+    assert all(c["block_end_idx"] >= c["block_start_idx"] for c in chunks)
+
+
+def test_insert_chunks_writes_metadata_columns_positive(monkeypatch):
+    db = FakeDb()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    document_id = uuid.uuid4()
+    source_version_id = uuid.uuid4()
+
+    class FakeSettings:
+        CHUNK_TARGET_TOKENS = 650
+        CHUNK_MAX_TOKENS = 900
+        CHUNK_MIN_TOKENS = 120
+        CHUNK_OVERLAP_TOKENS = 80
+
+    monkeypatch.setattr("app.services.ingestion._load_settings", lambda: FakeSettings())
+
+    from app.services.ingestion import _insert_chunks
+
+    chunk_ids = _insert_chunks(db, tenant, document_id, source_version_id, "# T\n\ntext body")
+    assert chunk_ids
+    insert_calls = [x for x in db.calls if "INSERT INTO chunks" in x[0]]
+    assert insert_calls
+    params = insert_calls[0][1]
+    assert "chunk_type" in params
+    assert "char_start" in params
+    assert "char_end" in params
+    assert "block_start_idx" in params
+    assert "block_end_idx" in params
