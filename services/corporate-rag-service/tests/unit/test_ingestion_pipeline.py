@@ -12,6 +12,9 @@ class FakeMappings:
     def all(self):
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class FakeResult:
     rowcount = 1
@@ -26,14 +29,55 @@ class FakeResult:
 class FakeDb:
     def __init__(self):
         self.calls = []
+        self.sources = {}
+        self.source_versions = {}
+        self.documents_by_version = {}
+        self.chunks_by_document = {}
+        self.chunk_texts = {}
 
     def execute(self, statement, params=None):
         stmt = str(statement)
         payload = params or {}
         self.calls.append((stmt, payload))
+        if "SELECT source_id" in stmt and "FROM sources" in stmt:
+            key = (payload.get("tenant_id"), payload.get("source_type"), payload.get("external_ref"))
+            source_id = self.sources.get(key)
+            return FakeResult([] if source_id is None else [{"source_id": source_id}])
+        if "INSERT INTO sources" in stmt:
+            key = (payload.get("tenant_id"), payload.get("source_type"), payload.get("external_ref"))
+            self.sources.setdefault(key, payload.get("source_id"))
+            return FakeResult()
+
+        if "SELECT source_version_id" in stmt and "FROM source_versions" in stmt:
+            key = (payload.get("source_id"), payload.get("checksum"))
+            version_id = self.source_versions.get(key)
+            return FakeResult([] if version_id is None else [{"source_version_id": version_id}])
+        if "INSERT INTO source_versions" in stmt:
+            key = (payload.get("source_id"), payload.get("checksum"))
+            self.source_versions.setdefault(key, payload.get("source_version_id"))
+            return FakeResult()
+
+        if "SELECT document_id" in stmt and "FROM documents" in stmt and "source_version_id" in stmt:
+            version_id = payload.get("source_version_id")
+            document_id = self.documents_by_version.get(version_id)
+            return FakeResult([] if document_id is None else [{"document_id": document_id}])
+        if "INSERT INTO documents" in stmt:
+            self.documents_by_version[payload.get("source_version_id")] = payload.get("document_id")
+            return FakeResult()
+
+        if "SELECT chunk_id" in stmt and "FROM chunks" in stmt and "document_id" in stmt:
+            ids = self.chunks_by_document.get(payload.get("document_id"), [])
+            return FakeResult([{"chunk_id": chunk_id} for chunk_id in ids])
+        if "INSERT INTO chunks" in stmt:
+            document_id = payload.get("document_id")
+            chunk_id = payload.get("chunk_id")
+            self.chunks_by_document.setdefault(document_id, []).append(chunk_id)
+            self.chunk_texts[chunk_id] = payload.get("chunk_text", "")
+            return FakeResult()
+
         if "SELECT c.chunk_id, c.chunk_text" in stmt and "LEFT JOIN chunk_vectors" in stmt:
             chunk_ids = payload.get("chunk_ids", [])
-            return FakeResult([{"chunk_id": cid, "chunk_text": "chunk text"} for cid in chunk_ids])
+            return FakeResult([{"chunk_id": cid, "chunk_text": self.chunk_texts.get(cid, "chunk text")} for cid in chunk_ids])
         return FakeResult()
 
     def commit(self):
@@ -138,6 +182,55 @@ def test_ingest_sources_sync_negative_unknown_source_type_no_data():
     assert storage.put_calls == []
 
 
+def test_ingest_sources_sync_repeated_run_is_idempotent_for_sources_versions_documents_and_chunks(monkeypatch):
+    db = FakeDb()
+    storage = FakeStorage()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    first = ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=storage)
+    first_storage_calls = len(storage.put_calls)
+    second = ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=storage)
+
+    assert first["documents"] == 1
+    assert first["chunks"] >= 1
+    assert second["documents"] == 0
+    assert second["chunks"] == 0
+    assert len(storage.put_calls) == first_storage_calls
+
+    source_insert_calls = [sql for sql, _ in db.calls if "INSERT INTO sources" in sql]
+    source_version_calls = [sql for sql, _ in db.calls if "INSERT INTO source_versions" in sql]
+    document_calls = [sql for sql, _ in db.calls if "INSERT INTO documents" in sql]
+    chunk_calls = [sql for sql, _ in db.calls if "INSERT INTO chunks" in sql]
+    assert len(source_insert_calls) == 1
+    assert len(source_version_calls) == 1
+    assert len(document_calls) == 1
+    assert len(chunk_calls) == first["chunks"]
+
+
+def test_insert_source_version_returns_existing_for_same_checksum():
+    from app.services.ingestion import _insert_source_version
+
+    db = FakeDb()
+    source_id = uuid.uuid4()
+    checksum = "abc123"
+
+    first_id, first_created = _insert_source_version(db, source_id, checksum, "s3://raw/1", "s3://md/1")
+    second_id, second_created = _insert_source_version(db, source_id, checksum, "s3://raw/2", "s3://md/2")
+
+    assert first_created is True
+    assert second_created is False
+    assert first_id == second_id
+
+
 def test_upsert_chunk_vectors_retries_then_succeeds(monkeypatch):
     db = FakeDb()
     tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -233,6 +326,38 @@ code line
     assert all(c["block_end_idx"] >= c["block_start_idx"] for c in chunks)
 
 
+def test_normalize_to_markdown_preserves_fenced_code_block_spacing():
+    from app.services.ingestion import normalize_to_markdown
+
+    markdown = """before    text
+```
+def test():
+\tprint(  'x'  )
+```
+after    text
+"""
+    normalized = normalize_to_markdown(markdown)
+    assert "before text" in normalized
+    assert "after text" in normalized
+    assert "\tprint(  'x'  )" in normalized
+
+
+def test_normalize_to_markdown_preserves_nested_list_indentation():
+    from app.services.ingestion import normalize_to_markdown
+
+    markdown = "- parent\n    - nested    item\n"
+    normalized = normalize_to_markdown(markdown)
+    assert "\n    - nested item\n" in normalized
+
+
+def test_normalize_to_markdown_does_not_deform_markdown_table():
+    from app.services.ingestion import normalize_to_markdown
+
+    markdown = "| Name | Value  A |\n| --- | --- |\n| Key | Multi   value |\n"
+    normalized = normalize_to_markdown(markdown)
+    assert normalized == markdown
+
+
 def test_insert_chunks_writes_metadata_columns_positive(monkeypatch):
     db = FakeDb()
     tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -259,3 +384,11 @@ def test_insert_chunks_writes_metadata_columns_positive(monkeypatch):
     assert "char_end" in params
     assert "block_start_idx" in params
     assert "block_end_idx" in params
+
+
+def test_stub_file_byte_ingestor_is_declared_but_not_runtime_enabled():
+    from app.services.ingestion import StubFileByteIngestor
+
+    ingestor = StubFileByteIngestor()
+    with pytest.raises(NotImplementedError):
+        ingestor.ingest_bytes(uuid.uuid4(), "file:1", b"binary")

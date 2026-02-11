@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Index, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -168,6 +168,9 @@ class UserGroupMemberships(Base):
 
 class Sources(Base):
     __tablename__ = "sources"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_type", "external_ref", name="uq_sources_tenant_type_external_ref"),
+    )
     source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     source_type: Mapped[str] = mapped_column(Enum(*SOURCE_TYPE, name="source_type"))
@@ -177,8 +180,12 @@ class Sources(Base):
 
 class SourceVersions(Base):
     __tablename__ = "source_versions"
+    __table_args__ = (
+        UniqueConstraint("source_id", "checksum", name="uq_source_versions_source_checksum"),
+        Index("ix_source_versions_source_id", "source_id"),
+    )
     source_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     version_label: Mapped[str] = mapped_column(String(255))
     checksum: Mapped[str] = mapped_column(String(255))
     s3_raw_uri: Mapped[str] = mapped_column(String(1024))
