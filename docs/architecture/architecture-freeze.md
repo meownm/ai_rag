@@ -394,6 +394,23 @@ No simplifications introduced.
 All stated invariants verified as preserved.
 Simplifications explicitly forbidden and not applied.
 
+
+---
+## SP-A9: Chunking Specification Binding
+
+Chunking strategy is normatively defined in:
+
+docs/contracts/chunking_spec_v1.md
+
+This document is mandatory for implementation.
+Deviation requires architecture re-freeze.
+
+### Invariants check after SP-A9
+- Logical chunking preserved
+- Token budgets fixed
+- Overlap policy fixed
+- Stable chunk_id required
+
 ---
 
 # ARCHITECTURE_FINGERPRINT
@@ -404,6 +421,9 @@ LIST_ENDPOINTS:
 - corporate-rag-service: GET /v1/jobs/{job_id}
 - embeddings-service: GET /v1/health
 - embeddings-service: POST /v1/embeddings
+
+LIST_CONTRACT_BINDINGS:
+- docs/contracts/chunking_spec_v1.md (v1)
 
 LIST_ENUMS:
 - source_type:
