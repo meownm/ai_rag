@@ -48,5 +48,6 @@ export const RefusalSchema = z.object({
     .strict(),
 });
 
+export type Citation = z.infer<typeof CitationSchema>;
 export type QueryResponse = z.infer<typeof QueryResponseSchema>;
 export type RefusalResponse = z.infer<typeof RefusalSchema>;
