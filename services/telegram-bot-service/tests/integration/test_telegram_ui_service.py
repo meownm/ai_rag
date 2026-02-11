@@ -70,3 +70,21 @@ def test_debug_command_admin_only():
 
     allowed = service.handle_command(99, "/debug")
     assert "включен" in allowed[0].text
+
+
+def test_clarification_depth_exactly_limit_allows_last_clarification():
+    service = _service({"needs_clarification": True, "clarification_options": ["Вариант 1"]})
+    service.handle_command(1, "/start")
+    first = service.handle_text(1, "1")
+    assert "Уточните" in first[0].text
+    second = service.handle_callback(1, "clarification:0")
+    assert "Уточните" in second[0].text
+
+
+def test_clarification_depth_exceeded_returns_controlled_fallback():
+    service = _service({"needs_clarification": True, "clarification_options": ["Вариант 1"]})
+    service.handle_command(1, "/start")
+    service.handle_text(1, "1")
+    service.handle_callback(1, "clarification:0")
+    exceeded = service.handle_callback(1, "clarification:0")
+    assert "Не удалось уточнить" in exceeded[0].text

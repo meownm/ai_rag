@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     NEIGHBOR_WINDOW: int = 1
     USE_TOKEN_BUDGET_ASSEMBLY: bool = False
     MAX_CONTEXT_TOKENS: int = 8000
+    MODEL_CONTEXT_WINDOW: int = 8000
+    VERIFY_MODEL_NUM_CTX: bool = True
     USE_LLM_GENERATION: bool = False
 
     USE_CONVERSATION_MEMORY: bool = False
@@ -49,6 +51,9 @@ class Settings(BaseSettings):
     REWRITE_MODEL_ID: str = "qwen3:14b-instruct"
     REWRITE_KEEP_ALIVE: int = 0
     REWRITE_MAX_CONTEXT_TOKENS: int = 2048
+    MAX_CLARIFICATION_DEPTH: int = 2
+    CONFIDENCE_FALLBACK_THRESHOLD: float = 0.3
+    ENABLE_PER_STAGE_LATENCY_METRICS: bool = True
 
     CHUNK_TARGET_TOKENS: int = 650
     CHUNK_MAX_TOKENS: int = 900
