@@ -413,6 +413,17 @@ Deviation requires architecture re-freeze.
 
 ---
 
+
+## SP-A9: Chunking Specification Binding
+Chunking spec normative location: `docs/contracts/chunking_spec_v1.md`
+This document is mandatory per freeze.
+
+### Invariants check after SP-A9
+Chunking specification binding added and frozen as normative reference.
+No simplifications introduced.
+
+---
+
 # ARCHITECTURE_FINGERPRINT
 LIST_ENDPOINTS:
 - corporate-rag-service: GET /v1/health
@@ -694,6 +705,11 @@ LIST_TABLES:
     - started_at (timestamp)
     - ended_at (timestamp)
     - payload_json (jsonb)
+
+LIST_CONTRACT_BINDINGS:
+- openapi/rag.yaml
+- openapi/embeddings.yaml
+- docs/contracts/chunking_spec_v1.md (v1)
 
 LIST_ENV_VARS:
 - DB_HOST

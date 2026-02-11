@@ -5,5 +5,5 @@ from app.core.config import settings
 from app.core.logging import configure_logging
 
 configure_logging()
-app = FastAPI(title="Embeddings Service API", version=settings.app_version)
+app = FastAPI(title="Embeddings Service API", version=settings.APP_VERSION)
 app.include_router(router)

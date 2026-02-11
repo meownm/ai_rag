@@ -36,11 +36,29 @@ class Citation(BaseModel):
     score_breakdown: ScoreBreakdown | None = None
 
 
+
+
+class TraceScoreEntry(BaseModel):
+    chunk_id: UUID
+    lex_score: float
+    vec_score: float
+    rerank_score: float
+    boosts_applied: list[dict[str, Any]]
+    final_score: float
+    rank_position: int
+
+
+class QueryTrace(BaseModel):
+    trace_id: UUID
+    scoring_trace: list[TraceScoreEntry]
+
+
 class QueryResponse(BaseModel):
     answer: str
     only_sources_verdict: str
     citations: list[Citation] = []
     correlation_id: UUID
+    trace: QueryTrace | None = None
 
 
 class SourceSyncRequest(BaseModel):

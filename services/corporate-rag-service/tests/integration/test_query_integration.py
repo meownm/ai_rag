@@ -1,6 +1,10 @@
+import json
 import uuid
+
+import pytest
 from datetime import datetime, timezone
 
+pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from app.db.session import get_db
@@ -38,6 +42,24 @@ class FakeVector:
         self.embedding = emb
 
 
+
+
+class FakeMappings:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+class FakeExecResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return FakeMappings(self.rows)
+
+
 class FakeQuery:
     def __init__(self, rows):
         self.rows = rows
@@ -64,6 +86,9 @@ class FakeQuery:
 class FakeDB:
     def __init__(self, rows):
         self.rows = rows
+
+    def execute(self, *_args, **_kwargs):
+        return FakeExecResult([])
 
     def add(self, _obj):
         return None
@@ -111,7 +136,12 @@ def test_query_endpoint_reranker_changes_order(monkeypatch):
     }
     response = client.post("/v1/query", json=payload)
     assert response.status_code == 200
-    assert response.json()["citations"][0]["title"] == "HR Policy"
+    body = response.json()
+    assert body["citations"][0]["title"] == "HR Policy"
+    assert body["trace"]["trace_id"]
+    assert body["trace"]["scoring_trace"][0]["lex_score"] >= 0
+    assert body["trace"]["scoring_trace"][0]["vec_score"] >= 0
+    assert "boosts_applied" in body["trace"]["scoring_trace"][0]
 
 
 def test_query_endpoint_embeddings_failure(monkeypatch):
@@ -168,3 +198,35 @@ def test_get_job_not_found_returns_contract_envelope(monkeypatch):
     body = response.json()
     assert "error" in body
     assert body["error"]["code"] == "SOURCE_NOT_FOUND"
+
+
+def test_query_endpoint_hallucination_refusal_returns_structured_json(monkeypatch):
+    from app.api import routes
+
+    rows = [
+        (FakeChunk("Corporate policy requires annual security training completion.", 1, "11111111-1111-1111-1111-111111111111"), FakeDocument("Security Policy"), FakeVector([0.9, 0.1, 0.0])),
+    ]
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed(self, *args, **kwargs):
+            return [[0.8, 0.2, 0.0]]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "verify_answer", lambda *_args, **_kwargs: (False, {"unsupported_sentences": 1}))
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={
+            "tenant_id": "11111111-1111-1111-1111-111111111111",
+            "query": "vacation",
+            "top_k": 1,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["only_sources_verdict"] == "FAIL"
+    refusal = json.loads(body["answer"])
+    assert refusal["refusal"]["code"] == "ONLY_SOURCES_VIOLATION"
