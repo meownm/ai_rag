@@ -436,9 +436,11 @@ class ConfluencePagesConnector(SourceConnector):
         cql = self._build_cql()
         out: list[SourceDescriptor] = []
         start = 0
+        exhausted_listing = False
         while len(out) < sync_context.max_items_per_run:
             page = self.client.list_pages(cql=cql, start=start, limit=sync_context.page_size)
             if not page:
+                exhausted_listing = True
                 break
             for entry in page:
                 page_id = str(entry.get("id") or "")
@@ -464,7 +466,7 @@ class ConfluencePagesConnector(SourceConnector):
                 if len(out) >= sync_context.max_items_per_run:
                     break
             start += sync_context.page_size
-        return ConnectorListResult(descriptors=out, listing_complete=len(out) < sync_context.max_items_per_run)
+        return ConnectorListResult(descriptors=out, listing_complete=exhausted_listing)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         cfg = _load_settings()
@@ -542,9 +544,11 @@ class ConfluenceAttachmentConnector(SourceConnector):
         cql = self._build_cql()
         out: list[SourceDescriptor] = []
         start = 0
+        exhausted_listing = False
         while len(out) < sync_context.max_items_per_run:
             page = self.client.list_attachments(cql=cql, start=start, limit=sync_context.page_size)
             if not page:
+                exhausted_listing = True
                 break
             for entry in page:
                 attachment_id = str(entry.get("id") or "")
@@ -569,7 +573,7 @@ class ConfluenceAttachmentConnector(SourceConnector):
                 if len(out) >= sync_context.max_items_per_run:
                     break
             start += sync_context.page_size
-        return ConnectorListResult(descriptors=out, listing_complete=len(out) < sync_context.max_items_per_run)
+        return ConnectorListResult(descriptors=out, listing_complete=exhausted_listing)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         attachment_id = str(descriptor.metadata.get("attachment_id") or descriptor.external_ref.replace("attachment:", ""))

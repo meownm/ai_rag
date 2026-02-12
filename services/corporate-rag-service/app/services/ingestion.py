@@ -1083,14 +1083,8 @@ def ingest_sources_sync(
     for source_type in source_types:
         connector = connector_registry.get(source_type)
         list_result = connector.list_descriptors(str(tenant_id), sync_context)
-        if isinstance(list_result, ConnectorListResult):
-            descriptors = list_result.descriptors[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
-            listing_complete = bool(list_result.listing_complete)
-        else:
-            descriptors = list_result[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
-            # Legacy connectors that do not return ConnectorListResult are treated
-            # as non-authoritative for tombstone safety.
-            listing_complete = False
+        descriptors = list_result.descriptors[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
+        listing_complete = bool(list_result.listing_complete)
         counters["descriptors_listed"] += len(descriptors)
         seen_refs_by_source_type[source_type] = {d.external_ref for d in descriptors}
         listing_complete_by_source_type[source_type] = listing_complete
