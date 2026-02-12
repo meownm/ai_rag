@@ -53,3 +53,15 @@ def test_unknown_provider_limit_logs_warning(monkeypatch, caplog):
 
     validate_model_context_windows()
     assert "provider_context_limit_unknown" in caplog.text
+
+
+def test_startup_warns_when_pgvector_enabled_but_vector_retrieval_disabled(monkeypatch, caplog):
+    from app.main import _startup_validation
+    from app.services import startup_guards
+
+    monkeypatch.setattr("app.main.settings.PGVECTOR_ENABLED", True)
+    monkeypatch.setattr("app.main.settings.USE_VECTOR_RETRIEVAL", False)
+    monkeypatch.setattr(startup_guards.settings, "VERIFY_MODEL_NUM_CTX", False)
+
+    _startup_validation()
+    assert "startup_vector_retrieval_disabled_with_pgvector" in caplog.text

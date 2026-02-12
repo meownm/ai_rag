@@ -35,42 +35,91 @@ class FileByteIngestor:
             return self._pdf_to_markdown(payload)
         raise ValueError(f"Unsupported file extension: {ext}")
 
+    def _render_docx_table(self, table) -> list[str]:
+        rows = [[cell.text.strip().replace("\n", " ") for cell in row.cells] for row in table.rows]
+        if not rows:
+            return []
+        header = rows[0]
+        lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * len(header)) + " |"]
+        for row in rows[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return lines
+
+    def _paragraph_to_markdown(self, paragraph, numbered_index: int) -> tuple[str | None, int]:
+        text = paragraph.text.strip()
+        if not text:
+            return None, numbered_index
+
+        style = (paragraph.style.name or "").lower() if paragraph.style else ""
+        if style.startswith("heading"):
+            level = "".join(ch for ch in style if ch.isdigit()) or "1"
+            return f"{'#' * max(1, int(level))} {text}", numbered_index
+
+        if "list bullet" in style:
+            return f"- {text}", numbered_index
+
+        if "list number" in style:
+            numbered_index += 1
+            return f"{numbered_index}. {text}", numbered_index
+
+        return text, numbered_index
+
     def _docx_to_markdown(self, payload: bytes) -> str:
         import docx
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
 
         document = docx.Document(io.BytesIO(payload))
         lines: list[str] = []
-        for paragraph in document.paragraphs:
-            text = paragraph.text.strip()
-            if not text:
-                continue
-            style = (paragraph.style.name or "").lower() if paragraph.style else ""
-            if style.startswith("heading"):
-                level = "".join(ch for ch in style if ch.isdigit()) or "1"
-                lines.append(f"{'#' * max(1, int(level))} {text}")
-            else:
-                lines.append(text)
+        numbered_index = 0
 
-        for table in document.tables:
-            if not table.rows:
+        parent = document.element.body
+        for child in parent.iterchildren():
+            if child.tag.endswith("}p"):
+                paragraph = Paragraph(child, document)
+                rendered, numbered_index = self._paragraph_to_markdown(paragraph, numbered_index)
+                if rendered:
+                    lines.append(rendered)
                 continue
-            rows = [[cell.text.strip().replace("\n", " ") for cell in row.cells] for row in table.rows]
-            if not rows:
-                continue
-            header = rows[0]
-            lines.append("| " + " | ".join(header) + " |")
-            lines.append("| " + " | ".join(["---"] * len(header)) + " |")
-            for row in rows[1:]:
-                lines.append("| " + " | ".join(row) + " |")
+            if child.tag.endswith("}tbl"):
+                table = Table(child, document)
+                lines.extend(self._render_docx_table(table))
+
         return "\n\n".join(lines)
 
-    def _pdf_to_markdown(self, payload: bytes) -> str:
-        from pypdf import PdfReader
+    def _render_pdf_table(self, table: list[list[str | None]]) -> list[str]:
+        rows = [[(cell or "").strip().replace("\n", " ") for cell in row] for row in table if row and any(cell for cell in row)]
+        if len(rows) < 2:
+            return []
+        width = max(len(row) for row in rows)
+        normalized = [row + [""] * (width - len(row)) for row in rows]
+        header = normalized[0]
+        lines = ["| " + " | ".join(header) + " |", "| " + " | ".join(["---"] * len(header)) + " |"]
+        for row in normalized[1:]:
+            lines.append("| " + " | ".join(row) + " |")
+        return lines
 
-        reader = PdfReader(io.BytesIO(payload))
+    def _pdf_to_markdown(self, payload: bytes) -> str:
+        try:
+            import pdfplumber
+        except ImportError as exc:  # pragma: no cover - hard failure in misconfigured environments
+            raise RuntimeError("pdfplumber is required for PDF ingestion") from exc
+
         pages: list[str] = []
-        for idx, page in enumerate(reader.pages, start=1):
-            text = (page.extract_text() or "").strip()
-            if text:
-                pages.append(f"<!-- page:{idx} -->\n{text}")
-        return "\n\n".join(pages)
+        with pdfplumber.open(io.BytesIO(payload)) as pdf:
+            for idx, page in enumerate(pdf.pages, start=1):
+                blocks = [f"<!-- page:{idx} -->"]
+
+                page_text = (page.extract_text() or "").strip()
+                if page_text:
+                    paragraphs = [part.strip() for part in page_text.split("\n\n") if part.strip()]
+                    blocks.extend(paragraphs)
+
+                for table in page.extract_tables() or []:
+                    rendered = self._render_pdf_table(table)
+                    if rendered:
+                        blocks.extend(rendered)
+
+                pages.append("\n\n".join(blocks))
+
+        return "\n\n".join(page for page in pages if page.strip())

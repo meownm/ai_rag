@@ -1,4 +1,4 @@
-from pydantic import computed_field, field_validator
+from pydantic import computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     EMBEDDINGS_DEFAULT_MODEL_ID: str = "bge-m3"
     EMBEDDINGS_BATCH_SIZE: int = 64
     EMBEDDINGS_RETRY_ATTEMPTS: int = 3
-    USE_VECTOR_RETRIEVAL: bool = False
+    USE_VECTOR_RETRIEVAL: bool = True
     HYBRID_SCORE_NORMALIZATION: bool = False
     USE_CONTEXTUAL_EXPANSION: bool = False
     NEIGHBOR_WINDOW: int = 1
@@ -45,9 +45,9 @@ class Settings(BaseSettings):
     CONTEXT_EXPANSION_MIN_GAIN: float = 0.01
     CONTEXT_EXPANSION_TOPK_BASE: int = 8
     CONTEXT_EXPANSION_TOPK_HARD_CAP: int = 20
-    USE_TOKEN_BUDGET_ASSEMBLY: bool = False
-    MAX_CONTEXT_TOKENS: int = 8000
-    MODEL_CONTEXT_WINDOW: int = 8000
+    USE_TOKEN_BUDGET_ASSEMBLY: bool = True
+    MAX_CONTEXT_TOKENS: int = 65536
+    MODEL_CONTEXT_WINDOW: int = 65536
     VERIFY_MODEL_NUM_CTX: bool = True
     USE_LLM_GENERATION: bool = False
 
@@ -106,6 +106,14 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(f"LLM_NUM_CTX must be one of {sorted(allowed)}")
         return value
+
+    @model_validator(mode="after")
+    def validate_context_window_consistency(self) -> "Settings":
+        if self.MODEL_CONTEXT_WINDOW != self.LLM_NUM_CTX:
+            raise ValueError("MODEL_CONTEXT_WINDOW must be equal to LLM_NUM_CTX")
+        if self.MAX_CONTEXT_TOKENS > self.LLM_NUM_CTX:
+            raise ValueError("MAX_CONTEXT_TOKENS must be less than or equal to LLM_NUM_CTX")
+        return self
 
     @computed_field
     @property

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from os import getenv
+from app.core.config import settings
 
 MAX_CONTEXT_WORDS = 12000
-DEFAULT_TOP_K = int(getenv("DEFAULT_TOP_K", "5"))
-USE_CONTEXTUAL_EXPANSION = getenv("USE_CONTEXTUAL_EXPANSION", "false").lower() == "true"
-NEIGHBOR_WINDOW = int(getenv("NEIGHBOR_WINDOW", "1"))
-USE_TOKEN_BUDGET_ASSEMBLY = getenv("USE_TOKEN_BUDGET_ASSEMBLY", "false").lower() == "true"
-MAX_CONTEXT_TOKENS = int(getenv("MAX_CONTEXT_TOKENS", "8000"))
+DEFAULT_TOP_K = settings.DEFAULT_TOP_K
+USE_CONTEXTUAL_EXPANSION = settings.USE_CONTEXTUAL_EXPANSION
+NEIGHBOR_WINDOW = settings.NEIGHBOR_WINDOW
+USE_TOKEN_BUDGET_ASSEMBLY = settings.USE_TOKEN_BUDGET_ASSEMBLY
+MAX_CONTEXT_TOKENS = settings.MAX_CONTEXT_TOKENS
 TRUNCATION_MARKER = "\n[TRUNCATED_BY_TOKEN_BUDGET]"
 
 
@@ -80,39 +80,7 @@ def apply_context_budget(
     max_context_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> tuple[list[dict], dict]:
     if not use_token_budget_assembly:
-        before = sum(token_count(c["chunk_text"]) for c in chunks)
-        if before <= max_context_words:
-            return chunks, {
-                "context_word_count_before": before,
-                "context_word_count_after": before,
-                "chunks_dropped_count": 0,
-                "total_context_tokens_est": sum(estimate_tokens(c["chunk_text"]) for c in chunks),
-                "max_context_tokens": max_context_tokens,
-                "truncated": False,
-            }
-
-        retained = list(chunks)
-        dropped = 0
-        while retained and sum(token_count(c["chunk_text"]) for c in retained) > max_context_words:
-            idx = min(
-                range(len(retained)),
-                key=lambda i: (
-                    float(retained[i].get("final_score", 0.0)),
-                    retained[i].get("rank_position", 9999),
-                    retained[i]["chunk_id"],
-                ),
-            )
-            retained.pop(idx)
-            dropped += 1
-        after = sum(token_count(c["chunk_text"]) for c in retained)
-        return retained, {
-            "context_word_count_before": before,
-            "context_word_count_after": after,
-            "chunks_dropped_count": dropped,
-            "total_context_tokens_est": sum(estimate_tokens(c["chunk_text"]) for c in retained),
-            "max_context_tokens": max_context_tokens,
-            "truncated": False,
-        }
+        raise ValueError("Word-based context trimming is no longer supported; enable token budget assembly")
 
     if not chunks:
         return [], {
