@@ -1,0 +1,14 @@
+[
+  {"query": "Политика отпусков", "expected_document_id": "doc-hr-001"},
+  {"query": "Оформление больничного", "expected_document_id": "doc-hr-002"},
+  {"query": "Лимиты расходов в командировке", "expected_document_id": "doc-fin-001"},
+  {"query": "Кто утверждает бюджет", "expected_document_id": "doc-fin-003"},
+  {"query": "Процесс онбординга", "expected_document_id": "doc-ops-001"},
+  {"query": "SLA по инцидентам", "expected_document_id": "doc-ops-002"},
+  {"query": "Политика резервного копирования", "expected_document_id": "doc-sec-001"},
+  {"query": "Ротация ключей доступа", "expected_document_id": "doc-sec-002"},
+  {"query": "Классификация данных", "expected_document_id": "doc-sec-003"},
+  {"query": "Процесс code review", "expected_document_id": "doc-eng-002"},
+  {"query": "Требования к покрытию тестами", "expected_document_id": "doc-eng-003"},
+  {"query": "Порядок release management", "expected_document_id": "doc-eng-004"}
+]
