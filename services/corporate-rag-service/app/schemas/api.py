@@ -11,6 +11,30 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class ReadinessCheck(BaseModel):
+    ok: bool
+    detail: str | None = None
+
+
+class ReadinessResponse(BaseModel):
+    status: str
+    service: str = "corporate-rag-service"
+    version: str
+    checks: dict[str, ReadinessCheck]
+
+
+class MetricSummary(BaseModel):
+    count: int
+    sum: float
+    avg: float
+    latest: float | None = None
+
+
+class MetricsResponse(BaseModel):
+    status: str = "ok"
+    metrics: dict[str, MetricSummary]
+
+
 class QueryRequest(BaseModel):
     tenant_id: UUID
     query: str

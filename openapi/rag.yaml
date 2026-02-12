@@ -13,11 +13,71 @@ tags:
   - name: ingest
   - name: jobs
 paths:
-  /v1/health:
+  /health:
     get:
       tags: [health]
       summary: Health check
       operationId: getHealth
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness check (DB + model)
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Ready/degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+  /metrics:
+    get:
+      tags: [health]
+      summary: In-memory observability metrics snapshot
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Metric aggregates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+  /v1/ready:
+    get:
+      tags: [health]
+      summary: Backward-compatible readiness check (DB + model)
+      operationId: getReadinessV1
+      responses:
+        '200':
+          description: Ready/degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+  /v1/metrics:
+    get:
+      tags: [health]
+      summary: Backward-compatible metrics snapshot
+      operationId: getMetricsV1
+      responses:
+        '200':
+          description: Metric aggregates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+  /v1/health:
+    get:
+      tags: [health]
+      summary: Backward-compatible health check
+      operationId: getHealthV1
       responses:
         '200':
           description: Healthy
@@ -122,6 +182,57 @@ components:
           example: corporate-rag-service
         version:
           type: string
+    ReadinessCheck:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        detail:
+          type: string
+          nullable: true
+    ReadinessResponse:
+      type: object
+      required: [status, service, version, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        service:
+          type: string
+        version:
+          type: string
+        checks:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ReadinessCheck'
+    MetricSummary:
+      type: object
+      required: [count, sum, avg]
+      properties:
+        count:
+          type: integer
+        sum:
+          type: number
+          format: float
+        avg:
+          type: number
+          format: float
+        latest:
+          type: number
+          format: float
+          nullable: true
+    MetricsResponse:
+      type: object
+      required: [status, metrics]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        metrics:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/MetricSummary'
     QueryRequest:
       type: object
       required: [tenant_id, query]

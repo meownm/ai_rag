@@ -5,14 +5,14 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-_METRICS: dict[str, list[int]] = defaultdict(list)
+_METRICS: dict[str, list[float]] = defaultdict(list)
 
 
-def emit_metric(name: str, value: int) -> None:
-    _METRICS[name].append(int(value))
+def emit_metric(name: str, value: float) -> None:
+    _METRICS[name].append(float(value))
 
 
-def metric_samples(name: str) -> list[int]:
+def metric_samples(name: str) -> list[float]:
     return list(_METRICS.get(name, []))
 
 

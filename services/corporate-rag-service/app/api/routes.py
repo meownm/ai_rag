@@ -5,7 +5,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.clients.embeddings_client import EmbeddingsClient
@@ -18,6 +21,10 @@ from app.schemas.api import (
     ErrorEnvelope,
     ErrorInfo,
     HealthResponse,
+    MetricSummary,
+    MetricsResponse,
+    ReadinessCheck,
+    ReadinessResponse,
     JobAcceptedResponse,
     JobStatusResponse,
     QueryRequest,
@@ -40,11 +47,12 @@ from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
 from app.services.scoring_trace import build_scoring_trace
-from app.services.telemetry import emit_metric, log_stage_latency
+from app.services.telemetry import emit_metric, log_stage_latency, metric_samples
 from app.runners.conversation_summarizer import ConversationSummarizer
 from app.runners.query_rewriter import QueryRewriteError, QueryRewriter
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @lru_cache
 def get_reranker() -> RerankerService:
@@ -190,6 +198,33 @@ def _apply_memory_boosting(
     return updated, boosted
 
 
+
+
+def _summarize_metric(name: str) -> MetricSummary:
+    samples = metric_samples(name)
+    if not samples:
+        return MetricSummary(count=0, sum=0.0, avg=0.0, latest=None)
+    total = float(sum(samples))
+    return MetricSummary(count=len(samples), sum=total, avg=total / len(samples), latest=float(samples[-1]))
+
+
+def _readiness_db_check(db: Session) -> ReadinessCheck:
+    try:
+        db.execute(text("SELECT 1"))
+        return ReadinessCheck(ok=True)
+    except Exception as exc:  # noqa: BLE001
+        return ReadinessCheck(ok=False, detail=str(exc))
+
+
+def _readiness_model_check() -> ReadinessCheck:
+    try:
+        model_ctx = get_ollama_client().fetch_model_num_ctx(settings.LLM_MODEL)
+        if model_ctx is None:
+            return ReadinessCheck(ok=False, detail="model metadata unavailable")
+        return ReadinessCheck(ok=True, detail=f"num_ctx={model_ctx}")
+    except Exception as exc:  # noqa: BLE001
+        return ReadinessCheck(ok=False, detail=str(exc))
+
 def _build_retrieval_trace_rows(
     conversation_id: uuid.UUID,
     turn_id: uuid.UUID,
@@ -225,9 +260,49 @@ def _build_retrieval_trace_rows(
 
 
 
+@router.get("/health", response_model=HealthResponse)
 @router.get("/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(version=settings.APP_VERSION)
+
+
+@router.get("/v1/ready", response_model=ReadinessResponse)
+@router.get("/ready", response_model=ReadinessResponse)
+def ready(db: Session = Depends(get_db)) -> ReadinessResponse:
+    request_id = str(uuid.uuid4())
+    db_check = _readiness_db_check(db)
+    model_check = _readiness_model_check()
+    checks = {"db": db_check, "model": model_check}
+    all_ok = all(item.ok for item in checks.values())
+    logger.info(
+        "readiness_check",
+        extra={
+            "request_id": request_id,
+            "stage": "readiness",
+            "db_ok": db_check.ok,
+            "model_ok": model_check.ok,
+        },
+    )
+    return ReadinessResponse(
+        status="ok" if all_ok else "degraded",
+        version=settings.APP_VERSION,
+        checks=checks,
+    )
+
+
+@router.get("/v1/metrics", response_model=MetricsResponse)
+@router.get("/metrics", response_model=MetricsResponse)
+def metrics() -> MetricsResponse:
+    request_id = str(uuid.uuid4())
+    logger.info("metrics_snapshot", extra={"request_id": request_id, "stage": "metrics"})
+    return MetricsResponse(
+        metrics={
+            "token_usage": _summarize_metric("token_usage"),
+            "coverage_ratio": _summarize_metric("coverage_ratio"),
+            "clarification_rate": _summarize_metric("clarification_rate"),
+            "fallback_rate": _summarize_metric("fallback_rate"),
+        }
+    )
 
 
 @router.post("/v1/ingest/sources/sync", response_model=JobAcceptedResponse, status_code=202)
@@ -612,6 +687,7 @@ def post_query(
     ]
 
     t_citations_ms = int((time.perf_counter() - t_citations0) * 1000)
+
     if settings.ENABLE_PER_STAGE_LATENCY_METRICS:
         analysis_ms = int(timers.get("t_vector_ms", 0) + t_rerank)
         log_stage_latency(stage="analysis_agent", latency_ms=analysis_ms, model_id=settings.RERANKER_MODEL, request_id=str(corr))
@@ -673,6 +749,15 @@ def post_query(
     answer = pipeline_result.answer
     only_sources = pipeline_result.only_sources_verdict
     response_confidence = pipeline_result.confidence
+
+    selected_candidates_final = pipeline_result.selected_candidates
+    coverage_ratio = (len(selected_candidates_final) / len(tenant_safe_ranked)) if tenant_safe_ranked else 0.0
+    clarification_rate = 1.0 if pipeline_result.needs_clarification else 0.0
+    fallback_rate = 1.0 if only_sources != "PASS" else 0.0
+    emit_metric("token_usage", float(llm_tokens_est + llm_completion_tokens_est))
+    emit_metric("coverage_ratio", float(coverage_ratio))
+    emit_metric("clarification_rate", clarification_rate)
+    emit_metric("fallback_rate", fallback_rate)
     if settings.LOG_DATA_MODE.strip().lower() == "plain":
         log_event(
             db,
