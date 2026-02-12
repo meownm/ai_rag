@@ -22,7 +22,8 @@ class TelegramUiService:
         context = self.store.get_or_create(user_id, debug_default=self.config.ui_debug_default)
 
         if command == "/start":
-            transition(context, BotState.AWAITING_QUESTION)
+            if context.state != BotState.AWAITING_QUESTION:
+                self.store.reset_dialog(user_id)
             return [OutboundMessage("Привет! Задайте вопрос по документам.")]
 
         if command == "/new":
@@ -111,12 +112,12 @@ class TelegramUiService:
             return [OutboundMessage("Диалог сброшен. Задайте новый вопрос.")]
 
         if callback_data.startswith("clarification:"):
+            if context.state != BotState.CLARIFICATION:
+                return [OutboundMessage("Нет активного уточнения.")]
+
             if callback_data.endswith("cancel"):
                 transition(context, BotState.AWAITING_QUESTION)
                 return [OutboundMessage("Уточнение отменено.")]
-
-            if context.state != BotState.CLARIFICATION:
-                return [OutboundMessage("Нет активного уточнения.")]
 
             index = int(callback_data.split(":", 1)[1])
             if index >= len(context.pending_clarification):

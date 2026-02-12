@@ -70,3 +70,22 @@ def test_debug_command_admin_only():
 
     allowed = service.handle_command(99, "/debug")
     assert "включен" in allowed[0].text
+
+
+def test_start_is_idempotent_after_initial_start():
+    service = _service({"summary": "ok", "details": "d", "sources": [], "confidence": 0.9})
+
+    first = service.handle_command(1, "/start")
+    second = service.handle_command(1, "/start")
+
+    assert "Задайте вопрос" in first[0].text
+    assert "Задайте вопрос" in second[0].text
+
+
+def test_cancel_clarification_callback_is_ignored_when_not_in_clarification_state():
+    service = _service({"summary": "ok", "details": "d", "sources": [], "confidence": 0.9})
+
+    service.handle_command(1, "/start")
+    result = service.handle_callback(1, "clarification:cancel")
+
+    assert "Нет активного уточнения" in result[0].text
