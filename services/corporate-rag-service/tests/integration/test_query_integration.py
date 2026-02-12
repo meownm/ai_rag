@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.db.session import get_db
 from app.main import app
 from app.services.reranker import RerankerService
+from app.services.agent_pipeline import AgentPipelineResult, AgentStageTrace
 
 
 class FakeModel:
@@ -1022,6 +1023,10 @@ def test_stage_latency_metrics_are_emitted(monkeypatch):
     assert any(name == "rag_retrieval_latency" for name, _ in metric_calls)
     assert any(name == "rag_analysis_latency" for name, _ in metric_calls)
     assert any(name == "rag_answer_latency" for name, _ in metric_calls)
+    assert any(name == "token_usage" for name, _ in metric_calls)
+    assert any(name == "coverage_ratio" for name, _ in metric_calls)
+    assert any(name == "clarification_rate" for name, _ in metric_calls)
+    assert any(name == "fallback_rate" and float(value) == 0.0 for name, value in metric_calls)
 
 
 def test_low_confidence_fallback_triggered_below_threshold(monkeypatch):
@@ -1274,3 +1279,98 @@ def test_clarification_depth_exceeded_pipeline_logs_explicit_error(monkeypatch):
     assert called["value"] is True
     assert response.json()["only_sources_verdict"] == "FAIL"
     assert any(event == "ERROR" and payload.get("code") == "RH-CLARIFICATION-DEPTH-EXCEEDED" for event, payload in events)
+
+
+def test_fallback_rate_metric_reflects_pipeline_failure(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class FakeFailingPipeline:
+        def run(self, _request):
+            return AgentPipelineResult(
+                answer="fallback",
+                only_sources_verdict="FAIL",
+                selected_candidates=[],
+                confidence=0.0,
+                needs_clarification=False,
+                clarification_question=None,
+                fallback_reason="forced_test",
+                stage_traces=[AgentStageTrace(stage="rewrite_agent", latency_ms=1, output={})],
+            )
+
+    metric_calls = []
+
+    def _capture_metric(name, value):
+        metric_calls.append((name, value))
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_agent_pipeline", lambda: FakeFailingPipeline())
+    monkeypatch.setattr(routes, "emit_metric", _capture_metric)
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "policy", "top_k": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["only_sources_verdict"] == "FAIL"
+    assert any(name == "fallback_rate" and float(value) == 1.0 for name, value in metric_calls)
+
+
+def test_clarification_rate_metric_reflects_pipeline_clarification(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    class FakeClarificationPipeline:
+        def run(self, _request):
+            return AgentPipelineResult(
+                answer="Уточните, пожалуйста",
+                only_sources_verdict="PASS",
+                selected_candidates=[],
+                confidence=0.1,
+                needs_clarification=True,
+                clarification_question="Уточните, пожалуйста",
+                fallback_reason=None,
+                stage_traces=[AgentStageTrace(stage="rewrite_agent", latency_ms=1, output={})],
+            )
+
+    metric_calls = []
+
+    def _capture_metric(name, value):
+        metric_calls.append((name, value))
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_agent_pipeline", lambda: FakeClarificationPipeline())
+    monkeypatch.setattr(routes, "emit_metric", _capture_metric)
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "policy", "top_k": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Уточните, пожалуйста"
+    assert any(name == "clarification_rate" and float(value) == 1.0 for name, value in metric_calls)
+    assert any(name == "coverage_ratio" and float(value) == 0.0 for name, value in metric_calls)

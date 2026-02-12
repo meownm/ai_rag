@@ -61,3 +61,10 @@ Startup fails fast with `MODEL_CONTEXT_MISMATCH` when context window is incompat
 - **AG-2:** Implemented `RewriteAgent`, `RetrievalAgent`, `AnalysisAgent`, `AnswerAgent`; each returns validated structured results.
 - **AG-3:** Added `AgentPipeline` orchestrator with sequential execution, explicit stage error propagation (`AgentExecutionError`), confidence routing, and clarification-depth fallback routing (including clarification-only turns before retrieval).
 - **AG-4:** Added stage trace payload (`stage`, `latency_ms`, and optional debug output) and wired query endpoint to emit `AGENT_TRACE` logs in plain/debug mode.; clarification-depth overflow keeps explicit `RH-CLARIFICATION-DEPTH-EXCEEDED` error logging.
+
+
+## EPIC-5 observability stop points (OBS-1..OBS-3)
+
+- **OBS-1 Health endpoints:** added `/health`, `/ready`, retained `/v1/health`, and provided compatibility aliases `/v1/ready` + `/v1/metrics`; readiness reports DB and model checks.
+- **OBS-2 Metrics:** added `/metrics` snapshot for `token_usage`, `coverage_ratio`, `clarification_rate`, `fallback_rate`; rates are emitted from the final `AgentPipeline` verdict path.
+- **OBS-3 Structured logs:** JSON logging now standardizes `request_id` and `stage` keys for every log record.
