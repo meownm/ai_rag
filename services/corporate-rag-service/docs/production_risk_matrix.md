@@ -33,6 +33,9 @@ Last Updated: 2026-02-12
 | Risk ID | Former Severity | Description | Closure Rationale | Closed On | Owner |
 |---|---|---|---|---|---|
 | RISK-000 | P0 | Undefined release governance sequence. | Formal review chain and release gate artifacts introduced and mandated. | 2026-02-12 | release |
+| R1 | P0 | Tombstone could delete valid sources when connector listing is truncated/capped. | Added authoritative-listing gate (`listing_complete`) so tombstones are skipped for non-authoritative runs; verified by `tests/integration/test_tombstone_safety_integration.py`. | 2026-02-12 | release |
+| R2 | P0 | Raw content overwrite risk during re-ingest could violate source-version immutability. | Enforced immutable `raw.bin` path per `source_version_id`, mandatory immutable writes, and duplicate-checksum short-circuit; verified by `tests/integration/test_immutable_versioned_storage_integration.py` and `tests/unit/test_storage_service.py`. | 2026-02-12 | release |
+| R3 | P1 | Runtime mismatch between chunk_vectors UPSERT conflict target and schema constraints could cause IntegrityError or stale writes. | Added schema-alignment migration for `chunk_vectors.updated_at` + unique index `(tenant_id, chunk_id)` and aligned UPSERT conflict target; validated by `tests/integration/test_ingestion_constraints_integration.py` and `tests/unit/test_chunk_vectors_schema_alignment.py`. | 2026-02-12 | release |
 
 ## Release Blocking Rule
 

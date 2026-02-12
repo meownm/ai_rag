@@ -51,6 +51,8 @@ class ConnectorFetchResult:
 @dataclass(frozen=True)
 class ConnectorListResult:
     descriptors: list[SourceDescriptor]
+    # True only when the connector performed an authoritative full listing
+    # for this run (no truncation/cap applied).
     listing_complete: bool
 
 

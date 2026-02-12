@@ -9,12 +9,13 @@ def test_development_governance_review_chain_order_is_explicit():
     text = _read("docs/development_governance.md")
     expected = [
         "1. **Design Review**",
-        "2. **Regression Review**",
-        "3. **Architecture Review**",
-        "4. **Quality Review**",
-        "5. **Observability Review**",
-        "6. **Production Risk Update**",
-        "7. **Release Gate**",
+        "2. **Implementation**",
+        "3. **Regression Review**",
+        "4. **Architecture Review**",
+        "5. **Quality Review**",
+        "6. **Observability Review**",
+        "7. **Production Risk Update**",
+        "8. **Release Gate Decision**",
     ]
     positions = [text.index(item) for item in expected]
     assert positions == sorted(positions)
@@ -104,3 +105,40 @@ def test_release_gate_simulation_references_real_commit_sha():
     text = _read("docs/release_gate_simulation_epic_development_governance.md")
     assert "Commit SHA:" in text
     assert "pending" not in text.lower()
+
+
+def test_roadmap_phase_order_and_gate_names_are_documented():
+    text = _read("docs/production_grade_roadmap_v1.md")
+    phases = [
+        "### Phase 0 — Governance Foundation",
+        "### Phase 1 — Integrity Hardening",
+        "### Phase 2 — Observability Hardening",
+        "### Phase 3 — Quality Stabilization",
+        "### Phase 4 — Performance & Scale Hardening",
+        "### Phase 5 — Release v1.0 Cut",
+    ]
+    positions = [text.index(phase) for phase in phases]
+    assert positions == sorted(positions)
+
+    for gate in (
+        "Governance Gate",
+        "Integrity Gate",
+        "Observability Gate",
+        "Quality Gate",
+        "Performance Gate",
+        "Production Gate",
+    ):
+        assert gate in text
+
+
+def test_roadmap_global_constraints_include_non_regression_rules():
+    text = _read("docs/production_grade_roadmap_v1.md")
+    assert "No OpenAPI breaking changes." in text
+    assert "No feature removal without explicit decision." in text
+    assert "All invariants enforced by tests." in text
+    assert "CI must fail on invariant violations." in text
+
+
+def test_release_gate_template_tracks_implementation_verdict():
+    text = _read("docs/release_gate_template.md")
+    assert "Implementation verdict:" in text

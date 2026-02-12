@@ -9,7 +9,7 @@
 2. Dedicated worker (`app/workers/ingest_worker.py`) polls `ingest_jobs` with `FOR UPDATE SKIP LOCKED`, flips status to `processing`, runs `ingest_sources_sync`, and marks `done/error` with `result_json` and errors.
 3. `ingest_sources_sync` calls crawler adapters by source type and normalizes markdown.
 4. Pipeline writes source artifacts:
-   - raw source payload to `S3_BUCKET_RAW` (`raw.txt` for crawler markdown, `raw.bin` for upload bytes)
+   - raw source payload to `S3_BUCKET_RAW` as immutable `raw.bin` (all source types).
    - normalized markdown to `S3_BUCKET_MARKDOWN`
 5. Pipeline upserts `sources`, `source_versions` (checksum), `documents`, `chunks`, `document_links/cross_links`.
 6. Embedding indexing writes `chunk_vectors` using `embedding_text = "[H] {chunk_path}\n{chunk_text}"`.
@@ -33,9 +33,9 @@
 
 ## S3 artifacts
 
-- `s3://<raw-bucket>/<tenant>/<source>/raw.txt|raw.bin`
-- `s3://<markdown-bucket>/<tenant>/<source>/normalized.md`
-- `s3://<markdown-bucket>/<tenant>/<source>/artifacts/ingestion.json`
+- `s3://<raw-bucket>/<tenant>/<source>/<source_version>/raw.bin` (legacy rows keep existing URIs in DB and remain readable by URI).
+- `s3://<markdown-bucket>/<tenant>/<source>/<source_version>/normalized.md`
+- `s3://<markdown-bucket>/<tenant>/<source>/<source_version>/artifacts/ingestion.json`
 
 
 ## Unified connector flow

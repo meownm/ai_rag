@@ -13,12 +13,13 @@ This document formalizes the lightweight and automatable review chain required b
 Every EPIC and release candidate **must** pass the following sequence in this exact order:
 
 1. **Design Review** (owner: Design Agent)
-2. **Regression Review** (owner: Regression Review Agent)
-3. **Architecture Review** (owner: Architecture Review Agent)
-4. **Quality Review** (owner: Retrieval & Quality Agent)
-5. **Observability Review** (owner: Observability Review Agent)
-6. **Production Risk Update** (owner: Architecture Review Agent)
-7. **Release Gate** (owner: Release Authority Agent)
+2. **Implementation** (owner: Implementation Agent)
+3. **Regression Review** (owner: Regression Review Agent)
+4. **Architecture Review** (owner: Architecture Integrity Agent)
+5. **Quality Review** (owner: Retrieval & Context Quality Agent)
+6. **Observability Review** (owner: Observability & Audit Agent)
+7. **Production Risk Update** (owner: Performance & Scale Agent)
+8. **Release Gate Decision** (owner: Release Authority Agent)
 
 If any step fails, the process returns to Implementation Agent for remediation and restarts from the first failed step.
 
@@ -28,27 +29,31 @@ If any step fails, the process returns to Implementation Agent for remediation a
 - Input: EPIC scope, constraints, acceptance criteria.
 - Output: approved implementation plan + required docs/tests delta.
 
-### 2) Regression Review
+### 2) Implementation
+- Input: approved design plan.
+- Output: code, tests, and documentation updates bound to scope.
+
+### 3) Regression Review
 - Input: changed code and tests.
 - Output: regression verdict and gap list.
 
-### 3) Architecture Review
+### 4) Architecture Review
 - Input: design changes + invariants impact.
 - Output: architecture compliance verdict.
 
-### 4) Quality Review
+### 5) Quality Review
 - Input: retrieval behavior, golden suite status.
 - Output: quality verdict and quality drift notes.
 
-### 5) Observability Review
+### 6) Observability Review
 - Input: structured logs, required events, schema checks.
 - Output: observability compliance verdict.
 
-### 6) Production Risk Update
+### 7) Production Risk Update
 - Input: latest implementation and review findings.
 - Output: updated `docs/production_risk_matrix.md`.
 
-### 7) Release Gate
+### 8) Release Gate Decision
 - Input: all prior stage verdicts + risk matrix.
 - Output: one decision: **GO / GO WITH LIMITATIONS / NO-GO**.
 
@@ -70,6 +75,7 @@ The governance chain is bound to the EPIC stop points and must follow YAML order
 Use this checklist verbatim for every release candidate:
 
 - [ ] Design Review completed and approved.
+- [ ] Implementation completed and evidence recorded.
 - [ ] Regression Review completed and approved.
 - [ ] Architecture Review completed and approved.
 - [ ] Quality Review completed and approved.
