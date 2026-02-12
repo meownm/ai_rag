@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("pydantic")
+
 from app.services.startup_guards import StartupValidationError, validate_model_context_windows
 
 
@@ -22,7 +24,7 @@ def test_startup_fails_when_model_context_window_exceeds_actual(monkeypatch):
 
     with pytest.raises(StartupValidationError) as exc:
         validate_model_context_windows()
-    assert exc.value.error_code == "RH-MODEL-CONTEXT-MISMATCH"
+    assert exc.value.error_code == "MODEL_CONTEXT_MISMATCH"
 
 
 def test_startup_succeeds_when_verification_disabled(monkeypatch):
@@ -39,7 +41,7 @@ def test_provider_limit_mismatch_raises(monkeypatch):
 
     with pytest.raises(StartupValidationError) as exc:
         validate_model_context_windows()
-    assert exc.value.error_code == "RH-MODEL-CONTEXT-MISMATCH"
+    assert exc.value.error_code == "MODEL_CONTEXT_MISMATCH"
 
 
 def test_unknown_provider_limit_logs_warning(monkeypatch, caplog):

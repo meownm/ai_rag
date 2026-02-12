@@ -25,6 +25,14 @@ from app.schemas.api import (
     SourceSyncRequest,
 )
 from app.services.anti_hallucination import build_structured_refusal, verify_answer
+from app.services.agent_pipeline import (
+    AgentPipeline,
+    AgentPipelineRequest,
+    AnalysisAgentInput,
+    AnswerAgentInput,
+    RetrievalAgentInput,
+    RewriteAgentInput,
+)
 from app.services.audit import log_event
 from app.services.ingestion import EmbeddingIndexingError, ingest_sources_sync
 from app.services.performance import build_stage_budgets, exceeded_budgets
@@ -51,6 +59,10 @@ def get_embeddings_client() -> EmbeddingsClient:
 @lru_cache
 def get_ollama_client() -> OllamaClient:
     return OllamaClient(settings.LLM_ENDPOINT, settings.LLM_MODEL, settings.REQUEST_TIMEOUT_SECONDS)
+
+
+def get_agent_pipeline() -> AgentPipeline:
+    return AgentPipeline()
 
 
 def get_query_rewriter() -> QueryRewriter:
@@ -318,6 +330,7 @@ def post_query(
     clarification_enabled = bool(settings.USE_CLARIFICATION_LOOP and settings.USE_LLM_QUERY_REWRITE and settings.USE_CONVERSATION_MEMORY)
     clarification_pending = False
     last_clarification_question: str | None = None
+    clarification_depth_for_pipeline = 0
     if conversation_repo is not None and conversation_id is not None:
         latest_resolution = conversation_repo.get_latest_query_resolution(conversation_id)
         if latest_resolution is not None and bool(latest_resolution.needs_clarification):
@@ -381,6 +394,7 @@ def post_query(
                     "rewrite_keep_alive": settings.REWRITE_KEEP_ALIVE,
                     "clarification_pending": clarification_pending,
                     "last_question": last_clarification_question,
+                    "clarification_depth": conversation_repo.count_recent_consecutive_clarifications(conversation_id),
                 },
                 rewrite_confidence=rewrite_result.confidence,
                 topic_shift_detected=rewrite_result.topic_shift,
@@ -390,16 +404,70 @@ def post_query(
 
         if clarification_enabled and conversation_repo is not None and conversation_id is not None and user_turn is not None:
             clarification_streak = conversation_repo.count_recent_consecutive_clarifications(conversation_id)
+            clarification_depth = clarification_streak + (1 if rewrite_result and rewrite_result.clarification_needed else 0)
+            clarification_depth_for_pipeline = clarification_depth
             should_ask = bool(rewrite_result and rewrite_result.clarification_needed and rewrite_result.confidence < settings.REWRITE_CONFIDENCE_THRESHOLD)
-            if should_ask and clarification_streak < settings.MAX_CLARIFICATION_DEPTH:
-                clarification_text = (rewrite_result.clarification_question or "Please clarify your request.").strip()
-                conversation_repo.create_turn(conversation_id, "assistant", clarification_text, meta={"correlation_id": str(corr), "clarification": True})
+            if should_ask:
+                pipeline = get_agent_pipeline()
+                pipeline_result = pipeline.run(
+                    AgentPipelineRequest(
+                        query=payload.query,
+                        rewrite_input=RewriteAgentInput(
+                            query=payload.query,
+                            execute=lambda _q: {
+                                "resolved_query_text": resolved_query_text,
+                                "clarification_needed": bool(rewrite_result and rewrite_result.clarification_needed),
+                                "clarification_question": rewrite_result.clarification_question if rewrite_result else None,
+                                "confidence": float(rewrite_result.confidence) if rewrite_result else 1.0,
+                            },
+                        ),
+                        retrieval_input=RetrievalAgentInput(query=resolved_query_text, execute=lambda _q: {"ranked_candidates": []}),
+                        analysis_input_builder=lambda ranked_candidates: AnalysisAgentInput(
+                            ranked_candidates=ranked_candidates,
+                            execute=lambda _items: {"selected_candidates": [], "confidence": 0.0},
+                        ),
+                        answer_input_builder=lambda selected_candidates: AnswerAgentInput(
+                            query=payload.query,
+                            selected_candidates=selected_candidates,
+                            execute=lambda _q, _selected: {"answer": "", "only_sources_verdict": "PASS"},
+                        ),
+                        max_clarification_depth=settings.MAX_CLARIFICATION_DEPTH,
+                        clarification_depth=clarification_depth,
+                        confidence_fallback_threshold=-1.0,
+                        debug=_is_plain_log_mode(),
+                    )
+                )
+
+                if pipeline_result.fallback_reason == "clarification_depth_exceeded":
+                    log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_depth, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
+
+                if settings.LOG_DATA_MODE.strip().lower() == "plain":
+                    log_event(
+                        db,
+                        str(payload.tenant_id),
+                        str(corr),
+                        "AGENT_TRACE",
+                        {
+                            "agent_trace": [
+                                {"stage": t.stage, "latency_ms": t.latency_ms, "output": t.output}
+                                for t in pipeline_result.stage_traces
+                            ]
+                        },
+                    )
+
+                assistant_meta = {"correlation_id": str(corr), "clarification_depth": clarification_depth}
+                if pipeline_result.needs_clarification:
+                    assistant_meta["clarification"] = True
+                if pipeline_result.fallback_reason == "clarification_depth_exceeded":
+                    assistant_meta["clarification_limit_exceeded"] = True
+
+                conversation_repo.create_turn(conversation_id, "assistant", pipeline_result.answer, meta=assistant_meta)
                 t_total_ms = int((time.perf_counter() - t_start) * 1000)
                 trace = {"trace_id": str(corr), "scoring_trace": []}
                 log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
                 return QueryResponse(
-                    answer=clarification_text,
-                    only_sources_verdict="PASS",
+                    answer=pipeline_result.answer,
+                    only_sources_verdict=pipeline_result.only_sources_verdict,
                     citations=[],
                     correlation_id=corr,
                     trace={"trace_id": corr, "scoring_trace": []},
@@ -569,13 +637,55 @@ def post_query(
     if exceeded:
         log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"message": "perf_budget_exceeded", "exceeded": exceeded, "perf": perf, "budgets": budgets})
 
-    response_confidence = 0.0
-    if chosen:
-        response_confidence = float(chosen[0].get("final_score", 0.0) or 0.0)
+    response_confidence = 1.0
+    if settings.USE_LLM_GENERATION:
+        response_confidence = float(chosen[0].get("final_score", 0.0) or 0.0) if chosen else 0.0
 
-    if response_confidence < settings.CONFIDENCE_FALLBACK_THRESHOLD:
-        answer = "Похоже, недостаточно информации для ответа... Попробуйте сузить область запроса."
-        only_sources = "FAIL"
+    pipeline = get_agent_pipeline()
+    pipeline_result = pipeline.run(
+        AgentPipelineRequest(
+            query=payload.query,
+            rewrite_input=RewriteAgentInput(
+                query=payload.query,
+                execute=lambda _q: {
+                    "resolved_query_text": resolved_query_text,
+                    "clarification_needed": bool(rewrite_result and rewrite_result.clarification_needed),
+                    "clarification_question": rewrite_result.clarification_question if rewrite_result else None,
+                    "confidence": float(rewrite_result.confidence) if rewrite_result else 1.0,
+                },
+            ),
+            retrieval_input=RetrievalAgentInput(query=resolved_query_text, execute=lambda _q: {"ranked_candidates": tenant_safe_ranked}),
+            analysis_input_builder=lambda ranked_candidates: AnalysisAgentInput(
+                ranked_candidates=ranked_candidates,
+                execute=lambda _items: {"selected_candidates": chosen, "confidence": response_confidence},
+            ),
+            answer_input_builder=lambda selected_candidates: AnswerAgentInput(
+                query=payload.query,
+                selected_candidates=selected_candidates,
+                execute=lambda _q, _selected: {"answer": answer, "only_sources_verdict": only_sources},
+            ),
+            max_clarification_depth=settings.MAX_CLARIFICATION_DEPTH,
+            clarification_depth=clarification_depth_for_pipeline,
+            confidence_fallback_threshold=settings.CONFIDENCE_FALLBACK_THRESHOLD if settings.USE_LLM_GENERATION else -1.0,
+            debug=_is_plain_log_mode(),
+        )
+    )
+    answer = pipeline_result.answer
+    only_sources = pipeline_result.only_sources_verdict
+    response_confidence = pipeline_result.confidence
+    if settings.LOG_DATA_MODE.strip().lower() == "plain":
+        log_event(
+            db,
+            str(payload.tenant_id),
+            str(corr),
+            "AGENT_TRACE",
+            {
+                "agent_trace": [
+                    {"stage": t.stage, "latency_ms": t.latency_ms, "output": t.output}
+                    for t in pipeline_result.stage_traces
+                ]
+            },
+        )
 
     trace = build_scoring_trace(str(corr), chosen)
     trace["anti_hallucination"] = anti_payload

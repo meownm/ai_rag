@@ -339,6 +339,7 @@ def test_query_endpoint_flag_off_returns_retrieval_only_answer(monkeypatch):
     from app.api import routes
 
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [
@@ -433,6 +434,7 @@ def test_query_stateless_mode_does_not_write_conversation_tables(monkeypatch):
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", False)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -464,6 +466,7 @@ def test_query_memory_mode_persists_user_and_assistant_turns(monkeypatch):
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -503,6 +506,7 @@ def test_query_rewrite_flag_on_uses_resolved_query_for_embeddings(monkeypatch):
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -658,13 +662,14 @@ def test_clarification_turn_returns_question_without_retrieval(monkeypatch):
     assert "ConversationTurns" in names
 
 
-def test_clarification_followup_disables_new_question_after_two_streak(monkeypatch):
+def test_clarification_followup_exceeding_depth_returns_controlled_fallback(monkeypatch):
     from app.api import routes
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
     monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -711,7 +716,55 @@ def test_clarification_followup_disables_new_question_after_two_streak(monkeypat
     )
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "context"
+    assert "недостаточно информации" in response.json()["answer"].lower()
+
+
+
+
+def test_clarification_depth_exact_limit_still_asks_question(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
+
+    class FakeRewriteResult:
+        resolved_query_text = "resolved policy"
+        confidence = 0.1
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Need one more detail?"
+
+    class FakeRewriter:
+        def rewrite(self, **kwargs):
+            assert kwargs.get("clarification_pending") is True
+            return FakeRewriteResult()
+
+    class ClarifyStreakDB(FakeDB):
+        def query(self, model):
+            name = getattr(model, "__name__", "")
+            if name == "QueryResolutions":
+                q = FakeQuery([type("R", (), {"needs_clarification": True, "clarification_question": "q1"})()])
+                q.first = lambda: type("R", (), {"needs_clarification": True, "clarification_question": "q1"})()
+                return q
+            return super().query(model)
+
+    def _dep():
+        yield ClarifyStreakDB([])
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "it", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert "Need one more detail" in response.json()["answer"]
 
 
 def test_summary_created_after_threshold(monkeypatch):
@@ -719,6 +772,7 @@ def test_summary_created_after_threshold(monkeypatch):
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
     monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 1)
 
     doc = uuid.uuid4()
@@ -755,6 +809,7 @@ def test_summary_masked_mode_does_not_store_quotes(monkeypatch):
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
     monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 1)
     monkeypatch.setattr(routes.settings, "LOG_DATA_MODE", "MASKED")
 
@@ -790,6 +845,7 @@ def test_rewriter_receives_latest_summary_when_present(monkeypatch):
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -853,6 +909,7 @@ def test_clarification_signal_ignored_when_loop_flag_disabled(monkeypatch):
     monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
     monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", False)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
 
     doc = uuid.uuid4()
     rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
@@ -873,8 +930,13 @@ def test_clarification_signal_ignored_when_loop_flag_disabled(monkeypatch):
             return [0.8, 0.2]
 
     monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    class FakeOllamaLowConfidence:
+        def generate(self, *_args, **_kwargs):
+            return {"response": '{"status":"success","answer":"generated","citations":[{"chunk_id":"x","quote":"q"}]}' }
+
     monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
     monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: FakeOllamaLowConfidence())
 
     app.dependency_overrides[get_db] = override_db_with_rows(rows)
     client = TestClient(app)
@@ -885,7 +947,7 @@ def test_clarification_signal_ignored_when_loop_flag_disabled(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["answer"] == "context"
+    assert "недостаточно информации" in response.json()["answer"].lower()
 
 
 def test_summary_not_created_below_threshold(monkeypatch):
@@ -893,6 +955,7 @@ def test_summary_not_created_below_threshold(monkeypatch):
 
     monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
     monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
     monkeypatch.setattr(routes.settings, "CONVERSATION_SUMMARY_THRESHOLD_TURNS", 50)
 
     doc = uuid.uuid4()
@@ -917,3 +980,297 @@ def test_summary_not_created_below_threshold(monkeypatch):
     assert response.status_code == 200
     summaries = [obj for obj in holder["db"].added if obj.__class__.__name__ == "ConversationSummaries"]
     assert summaries == []
+
+
+def test_stage_latency_metrics_are_emitted(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+    monkeypatch.setattr(routes.settings, "ENABLE_PER_STAGE_LATENCY_METRICS", True)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("context", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.1, 0.2]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2]
+
+    stage_calls = []
+    metric_calls = []
+
+    def _capture_stage(**kwargs):
+        stage_calls.append(kwargs)
+
+    def _capture_metric(name, value):
+        metric_calls.append((name, value))
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "log_stage_latency", _capture_stage)
+    monkeypatch.setattr(routes, "emit_metric", _capture_metric)
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "policy", "top_k": 1},
+    )
+
+    assert response.status_code == 200
+    observed = {call["stage"] for call in stage_calls}
+    assert {"retrieval_agent", "analysis_agent", "answer_agent"}.issubset(observed)
+    assert any(name == "rag_retrieval_latency" for name, _ in metric_calls)
+    assert any(name == "rag_analysis_latency" for name, _ in metric_calls)
+    assert any(name == "rag_answer_latency" for name, _ in metric_calls)
+
+
+def test_low_confidence_fallback_triggered_below_threshold(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", True)
+    monkeypatch.setattr(routes.settings, "CONFIDENCE_FALLBACK_THRESHOLD", 0.3)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("completely unrelated corpus", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.0, 0.0]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.0, 0.0]
+
+    class FakeOllamaLowConfidence:
+        def generate(self, *_args, **_kwargs):
+            return {"response": '{"status":"success","answer":"generated","citations":[{"chunk_id":"x","quote":"q"}]}' }
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: FakeOllamaLowConfidence())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "vacation policy", "top_k": 1},
+    )
+
+    assert response.status_code == 200
+    assert "недостаточно информации" in response.json()["answer"].lower()
+
+
+def test_low_confidence_fallback_not_triggered_on_threshold_boundary(monkeypatch):
+    from app.api import routes
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", True)
+    monkeypatch.setattr(routes.settings, "CONFIDENCE_FALLBACK_THRESHOLD", 0.05)
+
+    doc = uuid.uuid4()
+    rows = [(FakeChunk("irrelevant", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Doc", doc), FakeVector([0.0, 0.0]))]
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.0, 0.0]
+
+    class FakeOllamaBoundary:
+        def generate(self, *_args, **_kwargs):
+            return {"response": '{"status":"success","answer":"generated","citations":[{"chunk_id":"x","quote":"q"}]}' }
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+    monkeypatch.setattr(routes, "get_ollama_client", lambda: FakeOllamaBoundary())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "vacation policy", "top_k": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "generated"
+
+
+def test_query_requests_pass_through_agent_pipeline(monkeypatch):
+    from app.api import routes
+    from app.services.agent_pipeline import AgentPipelineResult, AgentStageTrace
+
+    monkeypatch.setattr(routes.settings, "USE_LLM_GENERATION", False)
+
+    doc = uuid.uuid4()
+    rows = [
+        (FakeChunk("Vacation policy includes 28 calendar days for full-time employees.", 2, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("HR Policy", doc), FakeVector([0.1, 0.8, 0.2])),
+        (FakeChunk("Security training is mandatory.", 1, "11111111-1111-1111-1111-111111111111", doc), FakeDocument("Security Policy", doc), FakeVector([0.9, 0.1, 0.0])),
+    ]
+
+    monkeypatch.setattr(routes, "get_reranker", lambda: RerankerService("fake", model=FakeModel()))
+
+    class FakeEmbeddingsClient:
+        def embed_text(self, *_args, **_kwargs):
+            return [0.8, 0.2, 0.0]
+
+    monkeypatch.setattr(routes, "get_embeddings_client", lambda: FakeEmbeddingsClient())
+
+    called = {"value": False}
+
+    class SpyPipeline:
+        def run(self, request):
+            called["value"] = True
+            rewrite = request.rewrite_input.execute(request.query)
+            ranked = request.retrieval_input.execute(rewrite["resolved_query_text"])["ranked_candidates"]
+            analysis = request.analysis_input_builder(ranked).execute(ranked)
+            answer_data = request.answer_input_builder(analysis["selected_candidates"]).execute(request.query, analysis["selected_candidates"])
+            return AgentPipelineResult(
+                answer=answer_data["answer"],
+                only_sources_verdict=answer_data["only_sources_verdict"],
+                selected_candidates=analysis["selected_candidates"],
+                confidence=float(analysis["confidence"]),
+                needs_clarification=False,
+                clarification_question=None,
+                fallback_reason=None,
+                stage_traces=[AgentStageTrace(stage="rewrite_agent", latency_ms=1, output={})],
+            )
+
+    monkeypatch.setattr(routes, "get_agent_pipeline", lambda: SpyPipeline())
+
+    app.dependency_overrides[get_db] = override_db_with_rows(rows)
+    client = TestClient(app)
+    response = client.post("/v1/query", json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "vacation policy", "citations": True, "top_k": 2})
+
+    assert response.status_code == 200
+    assert called["value"] is True
+
+
+def test_clarification_path_passes_through_agent_pipeline(monkeypatch):
+    from app.api import routes
+    from app.services.agent_pipeline import AgentPipelineResult, AgentStageTrace
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
+    monkeypatch.setattr(routes.settings, "REWRITE_CONFIDENCE_THRESHOLD", 0.55)
+
+    class ClarifyDB(FakeDB):
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("retrieval should not run during clarification turn")
+
+    class FakeRewriteResult:
+        resolved_query_text = "ambiguous request"
+        confidence = 0.2
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Уточните подразделение?"
+
+    class FakeRewriter:
+        def rewrite(self, **_kwargs):
+            return FakeRewriteResult()
+
+    called = {"value": False}
+
+    class SpyPipeline:
+        def run(self, request):
+            called["value"] = True
+            rewrite = request.rewrite_input.execute(request.query)
+            assert rewrite["clarification_needed"] is True
+            assert request.clarification_depth == 1
+            return AgentPipelineResult(
+                answer="Уточните подразделение?",
+                only_sources_verdict="PASS",
+                selected_candidates=[],
+                confidence=0.2,
+                needs_clarification=True,
+                clarification_question="Уточните подразделение?",
+                fallback_reason=None,
+                stage_traces=[AgentStageTrace(stage="rewrite_agent", latency_ms=1, output={})],
+            )
+
+    holder = {}
+
+    def _dep():
+        db = ClarifyDB([])
+        holder["db"] = db
+        yield db
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_agent_pipeline", lambda: SpyPipeline())
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "leave", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert called["value"] is True
+    assert "Уточните" in response.json()["answer"]
+
+
+def test_clarification_depth_exceeded_pipeline_logs_explicit_error(monkeypatch):
+    from app.api import routes
+    from app.services.agent_pipeline import AgentPipelineResult, AgentStageTrace
+
+    monkeypatch.setattr(routes.settings, "USE_CONVERSATION_MEMORY", True)
+    monkeypatch.setattr(routes.settings, "USE_LLM_QUERY_REWRITE", True)
+    monkeypatch.setattr(routes.settings, "USE_CLARIFICATION_LOOP", True)
+    monkeypatch.setattr(routes.settings, "MAX_CLARIFICATION_DEPTH", 2)
+
+    class FakeRewriteResult:
+        resolved_query_text = "ambiguous request"
+        confidence = 0.1
+        topic_shift = False
+        clarification_needed = True
+        clarification_question = "Need more details?"
+
+    class FakeRewriter:
+        def rewrite(self, **_kwargs):
+            return FakeRewriteResult()
+
+    class ClarifyStreakDB(FakeDB):
+        def query(self, model):
+            name = getattr(model, "__name__", "")
+            if name == "QueryResolutions":
+                q = FakeQuery([type("R", (), {"needs_clarification": True, "clarification_question": "q1"})(), type("R", (), {"needs_clarification": True, "clarification_question": "q2"})()])
+                q.first = lambda: type("R", (), {"needs_clarification": True, "clarification_question": "q2"})()
+                return q
+            return super().query(model)
+
+    called = {"value": False}
+    events = []
+
+    class SpyPipeline:
+        def run(self, request):
+            called["value"] = True
+            assert request.clarification_depth == 3
+            return AgentPipelineResult(
+                answer="Похоже, недостаточно информации для ответа... Попробуйте уточнить вопрос и сузить область поиска.",
+                only_sources_verdict="FAIL",
+                selected_candidates=[],
+                confidence=0.0,
+                needs_clarification=False,
+                clarification_question=None,
+                fallback_reason="clarification_depth_exceeded",
+                stage_traces=[AgentStageTrace(stage="rewrite_agent", latency_ms=1, output={})],
+            )
+
+    def _capture_log_event(db, tenant_id, correlation_id, event_type, payload, duration_ms=None):
+        events.append((event_type, payload))
+        return None
+
+    monkeypatch.setattr(routes, "get_query_rewriter", lambda: FakeRewriter())
+    monkeypatch.setattr(routes, "get_agent_pipeline", lambda: SpyPipeline())
+    monkeypatch.setattr(routes, "log_event", _capture_log_event)
+
+    def _dep():
+        yield ClarifyStreakDB([])
+
+    app.dependency_overrides[get_db] = _dep
+    client = TestClient(app)
+    response = client.post(
+        "/v1/query",
+        json={"tenant_id": "11111111-1111-1111-1111-111111111111", "query": "leave", "top_k": 1},
+        headers={"X-Conversation-Id": "11111111-1111-1111-1111-111111111111"},
+    )
+
+    assert response.status_code == 200
+    assert called["value"] is True
+    assert response.json()["only_sources_verdict"] == "FAIL"
+    assert any(event == "ERROR" and payload.get("code") == "RH-CLARIFICATION-DEPTH-EXCEEDED" for event, payload in events)

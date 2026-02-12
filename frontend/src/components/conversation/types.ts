@@ -13,6 +13,7 @@ export type AssistantPayload = {
     coverageRatio?: number;
     modelContextWindow?: number;
     confidence?: number;
+    agentTrace?: Array<{ stage: string; latencyMs: number }>;
   };
 };
 
