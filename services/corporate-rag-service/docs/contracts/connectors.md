@@ -4,7 +4,7 @@
 
 - `SourceConnector` exposes:
   - `is_configured() -> (bool, reason)`
-  - `list_descriptors(tenant_id, sync_context) -> list[SourceDescriptor]`
+  - `list_descriptors(tenant_id, sync_context) -> ConnectorListResult` (where `listing_complete` is explicit authoritative listing signal)
   - `fetch_item(tenant_id, descriptor) -> ConnectorFetchResult`
 - `SourceDescriptor` is metadata-only and must provide stable `external_ref` per `source_type` and tenant.
 - `SourceItem.markdown` is the canonical ingestion input.
@@ -14,6 +14,7 @@
 1. `external_ref` is deterministic and unique in `(tenant_id, source_type)`.
 2. Connector metadata must be JSON-serializable and bounded (errors are truncated to 512 chars).
 3. Incremental decisions are deterministic for the same descriptor/state snapshot.
+4. `listing_complete=false` MUST be returned whenever connector cannot prove authoritative full listing (tombstone safety invariant).
 
 ## Idempotency
 

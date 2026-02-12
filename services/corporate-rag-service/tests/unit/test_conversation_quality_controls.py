@@ -3,7 +3,7 @@ import pytest
 pytest.importorskip("fastapi")
 pytest.importorskip("pydantic")
 
-from app.api.routes import _has_invalid_citations, _should_reset_topic, _trim_history_turns
+from app.api.routes import _assert_prompt_within_num_ctx, _ground_citations, _should_reset_topic, _trim_history_turns
 
 
 def test_trim_history_turns_enforces_turn_and_token_limits(monkeypatch):
@@ -22,20 +22,26 @@ def test_trim_history_turns_enforces_turn_and_token_limits(monkeypatch):
     assert trimmed[-1]["text"] == "g h i"
 
 
-def test_has_invalid_citations_rejects_hallucinated_chunk_id():
+def test_ground_citations_strips_hallucinated_chunk_id():
     allowed = {("c1", "d1"), ("c2", "d2")}
     citations = [{"chunk_id": "c1", "document_id": "d1"}, {"chunk_id": "missing", "document_id": "d9"}]
-    assert _has_invalid_citations(citations, allowed) is True
+    grounded, stripped = _ground_citations(citations, allowed)
+    assert stripped is True
+    assert grounded == [{"chunk_id": "c1", "document_id": "d1"}]
 
 
-def test_has_invalid_citations_accepts_retrieved_chunk_ids_only():
+def test_ground_citations_accepts_retrieved_chunk_ids_only():
     allowed = {("c1", "d1"), ("c2", "d2")}
     citations = [{"chunk_id": "c1", "document_id": "d1"}, {"chunk_id": "c2", "document_id": "d2"}]
-    assert _has_invalid_citations(citations, allowed) is False
+    grounded, stripped = _ground_citations(citations, allowed)
+    assert stripped is False
+    assert grounded == citations
 
 
-def test_has_invalid_citations_rejects_non_list_negative():
-    assert _has_invalid_citations({"chunk_id": "c1"}, {("c1", "d1")}) is True
+def test_ground_citations_rejects_non_list_negative():
+    grounded, stripped = _ground_citations({"chunk_id": "c1"}, {("c1", "d1")})
+    assert stripped is True
+    assert grounded == []
 
 def test_should_reset_topic_positive():
     reset, similarity = _should_reset_topic([1.0, 0.0], [0.0, 1.0], 0.35)
@@ -48,7 +54,24 @@ def test_should_reset_topic_negative():
     assert reset is False
     assert similarity > 0.35
 
-def test_has_invalid_citations_rejects_missing_document_id_negative():
+def test_ground_citations_rejects_missing_document_id_negative():
     allowed = {("c1", "d1")}
     citations = [{"chunk_id": "c1"}]
-    assert _has_invalid_citations(citations, allowed) is True
+    grounded, stripped = _ground_citations(citations, allowed)
+    assert stripped is True
+    assert grounded == []
+
+
+def test_assert_prompt_within_num_ctx_raises_on_overflow(monkeypatch):
+    monkeypatch.setattr("app.api.routes.settings.LLM_NUM_CTX", 100)
+    monkeypatch.setattr("app.api.routes.settings.TOKEN_BUDGET_SAFETY_MARGIN", 10)
+
+    with pytest.raises(ValueError, match="TOKEN_BUDGET_EXCEEDED"):
+        _assert_prompt_within_num_ctx("word " * 200)
+
+
+def test_assert_prompt_within_num_ctx_accepts_prompt_within_limit(monkeypatch):
+    monkeypatch.setattr("app.api.routes.settings.LLM_NUM_CTX", 1000)
+    monkeypatch.setattr("app.api.routes.settings.TOKEN_BUDGET_SAFETY_MARGIN", 50)
+
+    _assert_prompt_within_num_ctx("concise prompt")

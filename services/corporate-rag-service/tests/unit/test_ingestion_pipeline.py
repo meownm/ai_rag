@@ -132,10 +132,27 @@ class FakeDb:
 class FakeStorage:
     def __init__(self):
         self.put_calls = []
+        self._keys = set()
 
     def put_text(self, bucket: str, key: str, text: str) -> str:
         self.put_calls.append((bucket, key, text))
+        self._keys.add((bucket, key))
         return f"s3://{bucket}/{key}"
+
+    def put_text_immutable(self, bucket: str, key: str, text: str, checksum_hex: str) -> str:
+        if (bucket, key) in self._keys:
+            raise FileExistsError("S-STORAGE-VERSION-EXISTS")
+        return self.put_text(bucket, key, text)
+
+    def put_bytes(self, bucket: str, key: str, payload: bytes, content_type: str = "application/octet-stream") -> str:
+        self.put_calls.append((bucket, key, payload))
+        self._keys.add((bucket, key))
+        return f"s3://{bucket}/{key}"
+
+    def put_bytes_immutable(self, bucket: str, key: str, payload: bytes, checksum_hex: str, content_type: str = "application/octet-stream") -> str:
+        if (bucket, key) in self._keys:
+            raise FileExistsError("S-STORAGE-VERSION-EXISTS")
+        return self.put_bytes(bucket, key, payload, content_type=content_type)
 
 
 class FakeConfluence:
@@ -624,7 +641,7 @@ def test_file_upload_source_type_is_ingested_via_connector_registry(monkeypatch)
 def test_should_fetch_positive_and_negative():
     from datetime import datetime, timezone
 
-    from app.services.connectors.base import SourceDescriptor
+    from app.services.connectors.base import ConnectorListResult, SourceDescriptor
     from app.services.ingestion import should_fetch
 
     descriptor = SourceDescriptor(
@@ -875,7 +892,7 @@ def test_fcs_sp6_deleted_file_marked_in_sync_state(monkeypatch):
 
 
 def test_sp1_skip_tombstone_when_descriptor_listing_hits_cap(monkeypatch, caplog):
-    from app.services.connectors.base import SourceDescriptor
+    from app.services.connectors.base import ConnectorListResult, SourceDescriptor
 
     class FakeConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -884,10 +901,10 @@ def test_sp1_skip_tombstone_when_descriptor_listing_hits_cap(monkeypatch, caplog
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [
-                SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A"),
-                SourceDescriptor(source_type=self.source_type, external_ref="fs:b.md", title="B"),
-            ]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A")],
+                listing_complete=False,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             return type("R", (), {"error": None, "item": None, "raw_payload": None})()
@@ -935,7 +952,7 @@ def test_sp1_skip_tombstone_when_descriptor_listing_hits_cap(monkeypatch, caplog
 
 
 def test_sp1_mark_tombstone_when_descriptor_listing_complete(monkeypatch):
-    from app.services.connectors.base import SourceDescriptor
+    from app.services.connectors.base import ConnectorListResult, SourceDescriptor
 
     class FakeConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -944,7 +961,10 @@ def test_sp1_mark_tombstone_when_descriptor_listing_complete(monkeypatch):
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A")]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             return type("R", (), {"error": None, "item": None, "raw_payload": None})()

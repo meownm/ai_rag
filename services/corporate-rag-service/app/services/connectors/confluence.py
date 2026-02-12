@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from app.services.connectors.base import ConnectorError, ConnectorFetchResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
+from app.services.connectors.base import ConnectorError, ConnectorFetchResult, ConnectorListResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
 from app.services.file_ingestion import FileByteIngestor
 
 AC_NS = "http://atlassian.com/content"
@@ -432,7 +432,7 @@ class ConfluencePagesConnector(SourceConnector):
                 return "type=page and space in (" + ",".join(f'"{k}"' for k in keys) + ")"
         return "type=page"
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult:
         cql = self._build_cql()
         out: list[SourceDescriptor] = []
         start = 0
@@ -464,7 +464,7 @@ class ConfluencePagesConnector(SourceConnector):
                 if len(out) >= sync_context.max_items_per_run:
                     break
             start += sync_context.page_size
-        return out
+        return ConnectorListResult(descriptors=out, listing_complete=len(out) < sync_context.max_items_per_run)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         cfg = _load_settings()
@@ -538,7 +538,7 @@ class ConfluenceAttachmentConnector(SourceConnector):
                 return "type=attachment and space in (" + ",".join(f'\"{k}\"' for k in keys) + ")"
         return "type=attachment"
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult:
         cql = self._build_cql()
         out: list[SourceDescriptor] = []
         start = 0
@@ -569,7 +569,7 @@ class ConfluenceAttachmentConnector(SourceConnector):
                 if len(out) >= sync_context.max_items_per_run:
                     break
             start += sync_context.page_size
-        return out
+        return ConnectorListResult(descriptors=out, listing_complete=len(out) < sync_context.max_items_per_run)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         attachment_id = str(descriptor.metadata.get("attachment_id") or descriptor.external_ref.replace("attachment:", ""))

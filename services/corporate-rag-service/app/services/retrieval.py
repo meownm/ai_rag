@@ -113,7 +113,7 @@ def hybrid_rank(
         candidates,
         key=lambda x: (
             -float(x.get("final_score", 0.0)),
-            int(x.get("source_preference", 0)),
+            -int(x.get("source_preference", 0)),
             str(x.get("chunk_id")),
         ),
     )

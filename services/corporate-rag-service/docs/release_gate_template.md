@@ -22,6 +22,7 @@ Last Updated: 2026-02-12
 - [ ] Logs are structured JSON.
 - [ ] Audit event is present for the release decision.
 - [ ] Architectural invariants are re-validated against `docs/architectural_invariants.md`.
+- [ ] Integrity regression suite for architectural invariants passed in CI.
 
 ## Review Chain Evidence
 

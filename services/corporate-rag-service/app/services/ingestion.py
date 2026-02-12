@@ -53,7 +53,7 @@ except Exception:  # noqa: BLE001
 
 from app.db.repositories.source_sync_state import SourceSyncStateRepository
 from app.services.connectors import register_default_connectors
-from app.services.connectors.base import SourceDescriptor, SourceItem, SyncContext
+from app.services.connectors.base import ConnectorListResult, SourceDescriptor, SourceItem, SyncContext
 from app.services.connectors.registry import ConnectorRegistryError
 
 
@@ -974,11 +974,34 @@ def ingest_source_items(
             source_version_id = uuid.uuid4()
             raw_key = f"{tenant_id}/{source_id}/{source_version_id}/raw.bin" if raw_payload is not None else f"{tenant_id}/{source_id}/{source_version_id}/raw.txt"
             md_key = f"{tenant_id}/{source_id}/{source_version_id}/normalized.md"
-            if raw_payload is not None and hasattr(storage, "put_bytes"):
+            if raw_payload is not None and hasattr(storage, "put_bytes_immutable"):
+                raw_uri = storage.put_bytes_immutable(
+                    cfg.S3_BUCKET_RAW,
+                    raw_key,
+                    raw_payload,
+                    checksum_hex=hashlib.sha256(raw_payload).hexdigest(),
+                )
+            elif raw_payload is not None and hasattr(storage, "put_bytes"):
                 raw_uri = storage.put_bytes(cfg.S3_BUCKET_RAW, raw_key, raw_payload)
+            elif hasattr(storage, "put_text_immutable"):
+                raw_uri = storage.put_text_immutable(
+                    cfg.S3_BUCKET_RAW,
+                    raw_key,
+                    item.markdown,
+                    checksum_hex=hashlib.sha256(item.markdown.encode("utf-8")).hexdigest(),
+                )
             else:
                 raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
-            md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
+
+            if hasattr(storage, "put_text_immutable"):
+                md_uri = storage.put_text_immutable(
+                    cfg.S3_BUCKET_MARKDOWN,
+                    md_key,
+                    markdown,
+                    checksum_hex=hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+                )
+            else:
+                md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
             source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri, source_version_id=source_version_id)
         else:
             created_source_version = False
@@ -1068,8 +1091,13 @@ def ingest_sources_sync(
 
     for source_type in source_types:
         connector = connector_registry.get(source_type)
-        descriptors = connector.list_descriptors(str(tenant_id), sync_context)[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
-        listing_complete = len(descriptors) < settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN
+        list_result = connector.list_descriptors(str(tenant_id), sync_context)
+        if isinstance(list_result, ConnectorListResult):
+            descriptors = list_result.descriptors[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
+            listing_complete = bool(list_result.listing_complete)
+        else:
+            descriptors = list_result[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
+            listing_complete = len(descriptors) < settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN
         counters["descriptors_listed"] += len(descriptors)
         seen_refs_by_source_type[source_type] = {d.external_ref for d in descriptors}
         listing_complete_by_source_type[source_type] = listing_complete
@@ -1111,7 +1139,7 @@ def ingest_sources_sync(
         seen_refs = seen_refs_by_source_type.get(source_type, set())
         listing_complete = listing_complete_by_source_type.get(source_type, True)
         if not listing_complete:
-            LOGGER.info(
+            LOGGER.warning(
                 "connector_skip_tombstone_due_to_cap",
                 extra={
                     "event": "connector_skip_tombstone_due_to_cap",
