@@ -39,3 +39,17 @@ class ConfluenceConnector(SourceConnector):
 class ConfluenceAttachmentConnector(ConfluenceConnector):
     source_type = "CONFLUENCE_ATTACHMENT"
 
+
+class S3CatalogConnector(SourceConnector):
+    source_type = "S3_CATALOG_OBJECT"
+
+    def is_configured(self) -> tuple[bool, str | None]:
+        if not settings.S3_CATALOG_BUCKET:
+            return False, "S3_CATALOG_BUCKET is not configured"
+        return True, None
+
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+        return []
+
+    def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
+        return ConnectorFetchResult(error=ConnectorError("O-NOT-IMPLEMENTED", "S3 catalog connector implementation pending"))
