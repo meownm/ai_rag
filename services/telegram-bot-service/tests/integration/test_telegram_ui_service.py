@@ -1,5 +1,50 @@
-from telegram_ui.fsm import InMemoryConversationStore
-from telegram_ui.models import UiConfig
+import asyncio
+
+from telegram_ui.models import BotState, UiConfig
+from telegram_ui.models import ConversationContext
+
+
+class ConversationStoreStub:
+    def __init__(self):
+        self._contexts: dict[int, ConversationContext] = {}
+
+    def get_or_create(self, user_id: int, debug_default: bool = False):
+        if user_id not in self._contexts:
+            self._contexts[user_id] = ConversationContext(user_id=user_id, debug_enabled=debug_default)
+        return self._contexts[user_id]
+
+    def update(self, user_id: int, updater):
+        context = self._contexts[user_id]
+        updater(context)
+        return context
+
+    def reset_dialog(self, user_id: int):
+        context = self.get_or_create(user_id)
+        context.conversation_id = ConversationContext(user_id=user_id).conversation_id
+        context.clarification_depth = 0
+        context.pending_clarification = []
+        context.last_question = None
+        context.last_response = None
+        context.processing = False
+        context.state = BotState.AWAITING_QUESTION
+        return context
+
+    def try_begin_processing(self, user_id: int) -> bool:
+        context = self.get_or_create(user_id)
+        if context.processing:
+            return False
+        context.processing = True
+        return True
+
+    def finish_processing(self, user_id: int) -> None:
+        self.get_or_create(user_id).processing = False
+
+    def maybe_run_cleanup(self) -> int:
+        return 0
+
+    def run_cleanup(self, *, force: bool = False) -> int:
+        return 0
+
 from telegram_ui.service import TelegramUiService
 
 
@@ -18,7 +63,7 @@ def _service(response, enable_debug: bool = False):
         enable_debug_command=enable_debug,
         admin_user_ids={99},
     )
-    return TelegramUiService(config=config, rag_client=FakeRagClient(response), store=InMemoryConversationStore())
+    return TelegramUiService(config=config, rag_client=FakeRagClient(response), store=ConversationStoreStub())
 
 
 def test_start_and_successful_response_includes_actions():
@@ -186,3 +231,58 @@ def test_debug_command_in_awaiting_question_does_not_break_state_machine():
 
     status = service.handle_command(99, "/status")
     assert "AWAITING_QUESTION" in status[0].text
+
+
+def test_new_command_resets_dialog_state():
+    service = _service({"summary": "ok", "details": "d", "sources": [], "confidence": 0.9})
+    service.handle_command(1, "/start")
+    service.handle_text(1, "Вопрос")
+
+    reset = service.handle_command(1, "/new")
+    assert "Новый диалог" in reset[0].text
+
+    status = service.handle_command(1, "/status")
+    assert "AWAITING_QUESTION" in status[0].text
+    assert "0/2" in status[0].text
+
+
+class CleanupAwareStore(ConversationStoreStub):
+    def __init__(self):
+        super().__init__()
+        self.maybe_cleanup_calls = 0
+        self.run_cleanup_calls = 0
+
+    def maybe_run_cleanup(self) -> int:
+        self.maybe_cleanup_calls += 1
+        return 0
+
+    def run_cleanup(self, *, force: bool = False) -> int:
+        self.run_cleanup_calls += 1
+        return 0
+
+
+def test_opportunistic_cleanup_guard_runs_on_request_paths():
+    config = UiConfig(rag_api_url="http://localhost:8000")
+    store = CleanupAwareStore()
+    service = TelegramUiService(config=config, rag_client=FakeRagClient({"summary": "ok", "details": "d", "sources": [], "confidence": 0.9}), store=store)
+
+    service.handle_command(1, "/start")
+    service.handle_text(1, "Вопрос")
+    service.handle_callback(1, "analysis_details")
+
+    assert store.maybe_cleanup_calls >= 3
+
+
+def test_background_cleanup_task_runs_and_stops_gracefully():
+    async def _run():
+        config = UiConfig(rag_api_url="http://localhost:8000", fsm_cleanup_interval_seconds=0)
+        store = CleanupAwareStore()
+        service = TelegramUiService(config=config, rag_client=FakeRagClient({"summary": "ok", "details": "d", "sources": [], "confidence": 0.9}), store=store)
+
+        await service.start_background_tasks()
+        await asyncio.sleep(0.01)
+        await service.stop_background_tasks()
+
+        assert store.run_cleanup_calls >= 1
+
+    asyncio.run(_run())

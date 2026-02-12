@@ -36,3 +36,5 @@ class UiConfig:
     enable_debug_command: bool = False
     ui_debug_default: bool = False
     admin_user_ids: set[int] = field(default_factory=set)
+    fsm_ttl_hours: int = 24
+    fsm_cleanup_interval_seconds: int = 1800

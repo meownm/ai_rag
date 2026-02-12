@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .fsm import transition
@@ -18,6 +20,8 @@ class ConversationStore(Protocol):
     def reset_dialog(self, user_id: int): ...
     def try_begin_processing(self, user_id: int) -> bool: ...
     def finish_processing(self, user_id: int) -> None: ...
+    def maybe_run_cleanup(self) -> int: ...
+    def run_cleanup(self, *, force: bool = False) -> int: ...
 
 
 @dataclass(slots=True)
@@ -25,8 +29,42 @@ class TelegramUiService:
     config: UiConfig
     rag_client: RAGClient
     store: ConversationStore
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger(__name__))
+    _cleanup_task: asyncio.Task | None = field(default=None, init=False)
+    _cleanup_stop: asyncio.Event | None = field(default=None, init=False)
+
+    async def start_background_tasks(self) -> None:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            return
+        self._cleanup_stop = asyncio.Event()
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop(), name="telegram-fsm-cleanup")
+
+    async def stop_background_tasks(self) -> None:
+        if self._cleanup_stop is not None:
+            self._cleanup_stop.set()
+        if self._cleanup_task is not None:
+            await self._cleanup_task
+
+    async def _cleanup_loop(self) -> None:
+        assert self._cleanup_stop is not None
+        while not self._cleanup_stop.is_set():
+            try:
+                await asyncio.to_thread(self.store.run_cleanup, force=True)
+            except Exception:
+                self.logger.exception("fsm_cleanup_failed", extra={"event": "fsm_cleanup_failed"})
+            try:
+                await asyncio.wait_for(self._cleanup_stop.wait(), timeout=self.config.fsm_cleanup_interval_seconds)
+            except asyncio.TimeoutError:
+                continue
+
+    def _maybe_cleanup(self) -> None:
+        try:
+            self.store.maybe_run_cleanup()
+        except Exception:
+            self.logger.exception("fsm_cleanup_guard_failed", extra={"event": "fsm_cleanup_guard_failed"})
 
     def handle_command(self, user_id: int, command: str) -> list[OutboundMessage]:
+        self._maybe_cleanup()
         context = self.store.get_or_create(user_id, debug_default=self.config.ui_debug_default)
 
         if command == "/start":
@@ -137,6 +175,7 @@ class TelegramUiService:
             self.store.finish_processing(context.user_id)
 
     def handle_text(self, user_id: int, text: str) -> list[OutboundMessage]:
+        self._maybe_cleanup()
         context = self.store.get_or_create(user_id, debug_default=self.config.ui_debug_default)
         if not self.store.try_begin_processing(user_id):
             return [OutboundMessage("⏳ Уже обрабатываю предыдущий запрос.")]
@@ -152,6 +191,7 @@ class TelegramUiService:
         return self._process_question(context, text)
 
     def handle_callback(self, user_id: int, callback_data: str) -> list[OutboundMessage]:
+        self._maybe_cleanup()
         context = self.store.get_or_create(user_id, debug_default=self.config.ui_debug_default)
 
         if callback_data == "new_dialog":

@@ -9,7 +9,7 @@
 Implemented in `services/telegram-bot-service/telegram_ui`:
 - FSM states: `IDLE`, `AWAITING_QUESTION`, `PROCESSING`, `CLARIFICATION`, `ANSWER`, `ERROR`, `DEBUG`.
 - Transition guards with invalid-transition protection.
-- Per-user isolated context storage with in-memory thread-safe store and Redis-backed store option (`RedisConversationStore`).
+- Per-user isolated context storage backed by PostgreSQL (`telegram_conversations`) via `PostgresConversationStore` with atomic row-level transitions.
 - Atomic processing lock per user (`try_begin_processing` / `finish_processing`) to prevent concurrent `PROCESSING` in both text and clarification-callback flows.
 - Clarification depth limit via `max_clarification_depth` and inline-button-only clarification path (free-text blocked while in `CLARIFICATION`), with malformed clarification callback guard.
 - Command layer:
@@ -40,12 +40,14 @@ Implemented in `frontend/src/pages/QueryPage.tsx` and `frontend/src/components/c
 - Friendly error mapping, including context overflow and network cases.
 
 ## Testing coverage updates
-- Telegram unit tests for FSM transitions/invalid transitions, store persistence/locking (`InMemory` + `RedisConversationStore`) and renderer split safety.
+- Telegram unit tests for FSM transitions/invalid transitions, PostgreSQL store persistence/locking, TTL cleanup and renderer split safety.
 - Telegram integration-style tests for commands, clarification depth, malformed callback handling, inline-only clarification UX, debug gate/state safety, debug trace rendering, and low confidence handling.
 - Web tests for structured rendering, clarification modal behavior, debug rendering, and refusal/error safety.
 
 ## Notes
-- Redis persistence is intentionally abstracted behind in-memory store in this increment (fallback mode).
+- Redis dependency removed from Telegram FSM path; state is fully PostgreSQL-backed and restart-safe.
+- In-app cleanup worker removes stale FSM rows without cron using `TELEGRAM_FSM_TTL_HOURS` (default `24`) and `TELEGRAM_FSM_CLEANUP_INTERVAL_SECONDS` (default `1800`).
+- Opportunistic cleanup guard runs on request path if background cleanup loop is unavailable, throttled by interval.
 - Conversational logic remains UI-layer local and backend-compatible.
 
 

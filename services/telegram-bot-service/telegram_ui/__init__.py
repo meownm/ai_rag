@@ -1,4 +1,4 @@
-from .fsm import InMemoryConversationStore, InvalidTransitionError
+from .fsm import InvalidTransitionError, PostgresConversationStore
 from .models import BotState, ConversationContext, UiConfig
 from .service import TelegramUiService
 
@@ -6,7 +6,7 @@ __all__ = [
     "BotState",
     "ConversationContext",
     "UiConfig",
-    "InMemoryConversationStore",
+    "PostgresConversationStore",
     "InvalidTransitionError",
     "TelegramUiService",
 ]
