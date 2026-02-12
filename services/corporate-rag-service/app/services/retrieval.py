@@ -94,8 +94,8 @@ def hybrid_rank(
     rerank_raws = [float(c.get("rerank_score", 0.0)) for c in candidates]
     rerank_norms = min_max_normalize(rerank_raws) if normalize_scores else rerank_raws
 
-    weight_vec = float(settings.HYBRID_WEIGHT_VECTOR)
-    weight_fts = float(settings.HYBRID_WEIGHT_FTS)
+    weight_vec = float(settings.HYBRID_W_VECTOR)
+    weight_fts = float(settings.HYBRID_W_FTS)
 
     for c, lex_norm, vec_norm, rerank_raw, rerank_norm in zip(candidates, lex_norms, vec_norms, rerank_raws, rerank_norms):
         boost = 0.05 if c.get("author") else 0.0
@@ -109,7 +109,14 @@ def hybrid_rank(
         c["hybrid_score"] = (weight_vec * c["vec_norm"]) + (weight_fts * c["lex_norm"])
         c["final_score"] = c["hybrid_score"]
 
-    ranked = sorted(candidates, key=lambda x: (-float(x.get("final_score", 0.0)), str(x.get("chunk_id"))))
+    ranked = sorted(
+        candidates,
+        key=lambda x: (
+            -float(x.get("final_score", 0.0)),
+            int(x.get("source_preference", 0)),
+            str(x.get("chunk_id")),
+        ),
+    )
     for idx, c in enumerate(ranked, start=1):
         c["rank_position"] = idx
     return ranked, timer

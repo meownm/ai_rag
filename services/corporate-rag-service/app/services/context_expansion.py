@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,7 +53,7 @@ class ContextExpansionEngine:
         doc_ids = {str(c.get("document_id")) for c in base if c.get("document_id") is not None}
         steps = [f"base:{len(base)}", f"doc_diversity:{len(doc_ids)}", f"mode:{mode}"]
 
-        if mode == "off":
+        if mode == "off" or not settings.EXPAND_NEIGHBORS_ENABLED:
             selected, debug = self._budget_select(base, token_budget, steps=steps)
             return selected, debug
 
@@ -64,10 +65,10 @@ class ContextExpansionEngine:
                 neighbors = self.repo.fetch_document_neighbors(
                     str(anchor.get("document_id")),
                     str(anchor.get("chunk_id")),
-                    window=max(0, settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW),
+                    window=max(0, settings.EXPAND_NEIGHBORS_WINDOW),
                 )
                 for n in neighbors:
-                    if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
+                    if extra_added >= settings.EXPAND_MAX_EXTRA_TOTAL:
                         break
                     if self._contains_chunk(expanded_neighbor, str(n.get("chunk_id"))):
                         continue
@@ -116,12 +117,12 @@ class ContextExpansionEngine:
                 neighbors = self.repo.fetch_document_neighbors(
                     str(doc_id),
                     str(anchor["chunk_id"]),
-                    window=max(0, settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW),
+                    window=max(0, settings.EXPAND_NEIGHBORS_WINDOW),
                 )
                 for n in neighbors:
-                    if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
+                    if extra_added >= settings.EXPAND_MAX_EXTRA_TOTAL:
                         break
-                    if expanded_per_doc.get(str(doc_id), 0) >= settings.CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC:
+                    if expanded_per_doc.get(str(doc_id), 0) >= settings.EXPAND_MAX_EXTRA_PER_DOC:
                         continue
                     if self._contains_chunk(expanded, str(n["chunk_id"])):
                         continue
@@ -132,16 +133,16 @@ class ContextExpansionEngine:
                     neighbors_added += 1
                     expanded_per_doc[str(doc_id)] = expanded_per_doc.get(str(doc_id), 0) + 1
 
-        if mode == "doc_neighbor_plus_links" and extra_added < settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
+        if mode == "doc_neighbor_plus_links" and extra_added < settings.EXPAND_MAX_EXTRA_TOTAL:
             should_expand_links = self._should_expand_links(base, chosen_docs)
             steps.append(f"links_enabled:{int(should_expand_links)}")
             linked_docs = self.repo.fetch_outgoing_linked_documents(chosen_doc_ids, settings.CONTEXT_EXPANSION_MAX_LINK_DOCS) if should_expand_links else []
             for linked_doc in linked_docs:
-                if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
+                if extra_added >= settings.EXPAND_MAX_EXTRA_TOTAL:
                     break
                 linked_chunks = self.repo.fetch_top_chunks_for_document(linked_doc, query_embedding, limit_n=2)
                 for chunk in linked_chunks:
-                    if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
+                    if extra_added >= settings.EXPAND_MAX_EXTRA_TOTAL:
                         break
                     if self._contains_chunk(expanded, str(chunk["chunk_id"])):
                         continue
@@ -195,11 +196,20 @@ class ContextExpansionEngine:
             out.append(c)
         return out
 
+    def _normalized_text_hash(self, text: str) -> str:
+        normalized = " ".join(str(text).split()).strip().lower()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
     def _redundancy_filter(self, candidates: list[dict]) -> tuple[list[dict], int]:
         kept: list[dict] = []
         filtered = 0
+        seen_hashes: set[str] = set()
         threshold = float(settings.CONTEXT_EXPANSION_REDUNDANCY_SIM_THRESHOLD)
         for c in candidates:
+            text_hash = self._normalized_text_hash(str(c.get("chunk_text", "")))
+            if text_hash in seen_hashes:
+                filtered += 1
+                continue
             embedding = list(c.get("embedding", []))
             path = "/".join(c.get("heading_path", []))
             redundant = False
@@ -211,6 +221,7 @@ class ContextExpansionEngine:
             if redundant:
                 filtered += 1
                 continue
+            seen_hashes.add(text_hash)
             kept.append(c)
         return kept, filtered
 

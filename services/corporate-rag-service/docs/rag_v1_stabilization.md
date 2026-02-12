@@ -107,3 +107,13 @@ At startup the service now:
 - Added stronger hybrid settings validation (`0..1` bounds + exact sum to `1.0`).
 - Neighbor-only expansion mode now also reports per-document expansion counters in debug metrics.
 - Added integration coverage for deterministic `hybrid_rank -> apply_context_budget` flow and topic-reset/citation-safety guard behavior.
+
+## Quality hardening updates
+
+- DOCX ingestion now keeps consecutive list paragraphs as a single markdown list block and supports configurable indentation via `DOCX_LIST_INDENT_SPACES`.
+- Hybrid retrieval uses normalized channels in `[0,1]`, weighted by `HYBRID_W_VECTOR` and `HYBRID_W_FTS`, with deterministic tie-break `(final desc, source_preference asc, chunk_id asc)`.
+- Candidate windows are configurable with `HYBRID_MAX_VECTOR` and `HYBRID_MAX_FTS`.
+- Context expansion is controlled by `EXPAND_NEIGHBORS_ENABLED`, `EXPAND_NEIGHBORS_WINDOW`, `EXPAND_MAX_EXTRA_TOTAL`, and `EXPAND_MAX_EXTRA_PER_DOC`.
+- Token budget enforcement applies `TOKEN_BUDGET_SAFETY_MARGIN` and deterministic tail truncation when needed.
+- Topic reset can be toggled with `TOPIC_RESET_ENABLED` and thresholded by `TOPIC_RESET_SIM_THRESHOLD`.
+- Citation validation now requires `(chunk_id, document_id)` pairs to exist in the selected context allowlist.

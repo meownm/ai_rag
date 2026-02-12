@@ -47,8 +47,8 @@ def test_neighbor_expansion_adds_window_chunks(monkeypatch):
     monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_TOPK_BASE", 8)
     monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_TOPK_HARD_CAP", 20)
     monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_DOCS", 4)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW", 1)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 12)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_NEIGHBORS_WINDOW", 1)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_TOTAL", 12)
 
     selected, debug = ContextExpansionEngine(repo).expand(
         final_query="q",
@@ -71,8 +71,8 @@ def test_doc_limit_and_extra_chunks_cap_enforced(monkeypatch):
     repo.neighbors[(doc_b, "b1", 1)] = [_cand("b2", doc_b, 2, 0.2, [0.1, 1])]
 
     monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_DOCS", 1)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 1)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW", 1)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_TOTAL", 1)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_NEIGHBORS_WINDOW", 1)
 
     selected, _ = ContextExpansionEngine(repo).expand(
         final_query="q",
@@ -127,7 +127,7 @@ def test_link_mode_includes_linked_doc_chunks(monkeypatch):
     repo.linked_chunks[doc_link] = [_cand("l1", doc_link, 1, 0.6, [0.1, 1.0])]
 
     monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_LINK_DOCS", 1)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 12)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_TOTAL", 12)
 
     selected, debug = ContextExpansionEngine(repo).expand(
         final_query="q",
@@ -187,8 +187,8 @@ def test_neighbor_mode_adds_neighbors_without_links(monkeypatch):
     base = [_cand("a1", doc_a, 2, 0.9, [1, 0])]
     repo.neighbors[(doc_a, "a1", 1)] = [_cand("a0", doc_a, 1, 0.1, [0.9, 0]), _cand("a2", doc_a, 3, 0.1, [0.8, 0.1])]
 
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW", 1)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 12)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_NEIGHBORS_WINDOW", 1)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_TOTAL", 12)
 
     selected, debug = ContextExpansionEngine(repo).expand(
         final_query="q",
@@ -229,8 +229,8 @@ def test_doc_neighbor_per_doc_cap_and_metrics(monkeypatch):
     repo.neighbors[(doc_a, "a1", 1)] = [_cand("a0", doc_a, 1, 0.2, [1, 0.1]), _cand("a2", doc_a, 3, 0.2, [1, 0.2])]
     repo.neighbors[(doc_b, "b1", 1)] = [_cand("b0", doc_b, 1, 0.2, [0.1, 1]), _cand("b2", doc_b, 3, 0.2, [0.2, 1])]
 
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 3)
-    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC", 1)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_TOTAL", 3)
+    monkeypatch.setattr("app.services.context_expansion.settings.EXPAND_MAX_EXTRA_PER_DOC", 1)
 
     selected, debug = ContextExpansionEngine(repo).expand(
         final_query="q",

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     HYBRID_SCORE_NORMALIZATION: bool = True
     HYBRID_WEIGHT_VECTOR: float = 0.7
     HYBRID_WEIGHT_FTS: float = 0.3
+    HYBRID_W_VECTOR: float = 0.7
+    HYBRID_W_FTS: float = 0.3
+    HYBRID_MAX_VECTOR: int = 20
+    HYBRID_MAX_FTS: int = 20
     USE_CONTEXTUAL_EXPANSION: bool = False
     NEIGHBOR_WINDOW: int = 1
     CONTEXT_EXPANSION_ENABLED: bool = False
@@ -50,6 +54,7 @@ class Settings(BaseSettings):
     CONTEXT_EXPANSION_TOPK_HARD_CAP: int = 20
     USE_TOKEN_BUDGET_ASSEMBLY: bool = True
     MAX_CONTEXT_TOKENS: int = 65536
+    TOKEN_BUDGET_SAFETY_MARGIN: int = 256
     MODEL_CONTEXT_WINDOW: int = 65536
     VERIFY_MODEL_NUM_CTX: bool = True
     USE_LLM_GENERATION: bool = False
@@ -57,6 +62,8 @@ class Settings(BaseSettings):
     USE_CONVERSATION_MEMORY: bool = False
     MAX_HISTORY_TURNS: int = 6
     MAX_HISTORY_TOKENS: int = 2048
+    TOPIC_RESET_ENABLED: bool = True
+    TOPIC_RESET_SIM_THRESHOLD: float = 0.35
     TOPIC_RESET_SIMILARITY_THRESHOLD: float = 0.35
     USE_LLM_QUERY_REWRITE: bool = False
     USE_CLARIFICATION_LOOP: bool = False
@@ -103,6 +110,12 @@ class Settings(BaseSettings):
     CHUNK_MAX_TOKENS: int = 900
     CHUNK_MIN_TOKENS: int = 120
     CHUNK_OVERLAP_TOKENS: int = 80
+    DOCX_LIST_INDENT_SPACES: int = 2
+
+    EXPAND_NEIGHBORS_ENABLED: bool = True
+    EXPAND_NEIGHBORS_WINDOW: int = 1
+    EXPAND_MAX_EXTRA_TOTAL: int = 12
+    EXPAND_MAX_EXTRA_PER_DOC: int = 6
 
     LOG_DATA_MODE: str = "PLAIN"
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -144,6 +157,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_hybrid_weights(self) -> "Settings":
+        if abs(self.HYBRID_WEIGHT_VECTOR - self.HYBRID_W_VECTOR) > 1e-6:
+            raise ValueError("HYBRID_WEIGHT_VECTOR and HYBRID_W_VECTOR must match")
+        if abs(self.HYBRID_WEIGHT_FTS - self.HYBRID_W_FTS) > 1e-6:
+            raise ValueError("HYBRID_WEIGHT_FTS and HYBRID_W_FTS must match")
         if self.HYBRID_WEIGHT_VECTOR < 0 or self.HYBRID_WEIGHT_FTS < 0:
             raise ValueError("HYBRID weights must be non-negative")
         if self.HYBRID_WEIGHT_VECTOR > 1 or self.HYBRID_WEIGHT_FTS > 1:
@@ -158,6 +175,12 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_CONTEXT_WINDOW must be equal to LLM_NUM_CTX")
         if self.MAX_CONTEXT_TOKENS > self.LLM_NUM_CTX:
             raise ValueError("MAX_CONTEXT_TOKENS must be less than or equal to LLM_NUM_CTX")
+        return self
+
+    @model_validator(mode="after")
+    def validate_topic_threshold_alias(self) -> "Settings":
+        if abs(self.TOPIC_RESET_SIMILARITY_THRESHOLD - self.TOPIC_RESET_SIM_THRESHOLD) > 1e-6:
+            raise ValueError("TOPIC_RESET_SIMILARITY_THRESHOLD and TOPIC_RESET_SIM_THRESHOLD must match")
         return self
 
     @computed_field
