@@ -1,6 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("pydantic")
+
+from app.services.context_expansion import ContextExpansionEngine
 from app.services.retrieval import hybrid_rank
 
 
@@ -78,3 +83,73 @@ def test_golden_set_citations_are_unique():
         key = (citation["doc_id"], citation["chunk_id"])
         assert key not in seen
         seen.add(key)
+
+
+def test_golden_neighbor_expectations_are_expandable():
+    golden_set = _load_golden()
+    for item in golden_set:
+        expected_neighbor = item.get("expected_neighbor_chunk_id")
+        if not expected_neighbor:
+            continue
+
+        citation = item["expected_citations"][0]
+        doc_id = citation["doc_id"]
+        anchor_id = citation["chunk_id"]
+
+        class _Repo:
+            @staticmethod
+            def fetch_document_neighbors(document_id: str, anchor_chunk_id: str, window: int = 1):
+                if document_id == doc_id and anchor_chunk_id == anchor_id and window == 1:
+                    return [
+                        {
+                            "chunk_id": anchor_id,
+                            "document_id": doc_id,
+                            "ordinal": 2,
+                            "final_score": 0.95,
+                            "embedding": [1.0, 0.0],
+                            "chunk_text": "anchor",
+                            "token_count": 10,
+                            "heading_path": ["section"],
+                        },
+                        {
+                            "chunk_id": expected_neighbor,
+                            "document_id": doc_id,
+                            "ordinal": 3,
+                            "final_score": 0.3,
+                            "embedding": [0.9, 0.1],
+                            "chunk_text": "neighbor",
+                            "token_count": 10,
+                            "heading_path": ["section"],
+                        },
+                    ]
+                return []
+
+            @staticmethod
+            def fetch_outgoing_linked_documents(_document_ids: list[str], _max_docs: int):
+                return []
+
+            @staticmethod
+            def fetch_top_chunks_for_document(_document_id: str, _query_embedding: list[float], limit_n: int = 2):
+                _ = limit_n
+                return []
+
+        selected, _ = ContextExpansionEngine(_Repo()).expand(
+            final_query=item["query"],
+            base_candidates=[
+                {
+                    "chunk_id": anchor_id,
+                    "document_id": doc_id,
+                    "ordinal": 2,
+                    "final_score": 0.95,
+                    "embedding": [1.0, 0.0],
+                    "chunk_text": "anchor",
+                    "token_count": 10,
+                    "heading_path": ["section"],
+                }
+            ],
+            token_budget=200,
+            mode="doc_neighbor",
+            query_embedding=[1.0, 0.0],
+        )
+
+        assert expected_neighbor in {c["chunk_id"] for c in selected}

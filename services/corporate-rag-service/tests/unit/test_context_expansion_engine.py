@@ -141,6 +141,46 @@ def test_link_mode_includes_linked_doc_chunks(monkeypatch):
     assert debug.expanded_from_links_count == 1
 
 
+def test_link_mode_skips_links_when_doc_depth_is_sufficient():
+    repo = FakeRepo()
+    doc_a = str(uuid.uuid4())
+    doc_link = str(uuid.uuid4())
+    base = [_cand("a1", doc_a, 1, 0.9, [1, 0]), _cand("a2", doc_a, 2, 0.8, [1, 0.1])]
+    repo.linked_docs = [doc_link]
+    repo.linked_chunks[doc_link] = [_cand("l1", doc_link, 1, 0.6, [0.1, 1.0])]
+
+    selected, debug = ContextExpansionEngine(repo).expand(
+        final_query="q",
+        base_candidates=base,
+        token_budget=200,
+        mode="doc_neighbor_plus_links",
+        query_embedding=[1, 0],
+    )
+
+    assert "l1" not in {c["chunk_id"] for c in selected}
+    assert debug.expanded_from_links_count == 0
+
+
+def test_doc_neighbor_preserves_document_rank_then_ordinal():
+    repo = FakeRepo()
+    doc_high, doc_low = str(uuid.uuid4()), str(uuid.uuid4())
+    base = [
+        _cand("l1", doc_low, 1, 0.4, [0, 1]),
+        _cand("h2", doc_high, 2, 0.9, [1, 0]),
+        _cand("h1", doc_high, 1, 0.85, [1, 0.1]),
+    ]
+
+    selected, _ = ContextExpansionEngine(repo).expand(
+        final_query="q",
+        base_candidates=base,
+        token_budget=200,
+        mode="doc_neighbor",
+        query_embedding=[1, 0],
+    )
+
+    assert [c["chunk_id"] for c in selected] == ["h1", "h2", "l1"]
+
+
 def test_neighbor_mode_adds_neighbors_without_links(monkeypatch):
     repo = FakeRepo()
     doc_a = str(uuid.uuid4())

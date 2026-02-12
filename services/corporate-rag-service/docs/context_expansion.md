@@ -6,6 +6,7 @@
 - `neighbor`: expands around each base anchor using ±`CONTEXT_EXPANSION_NEIGHBOR_WINDOW` (without doc grouping/link traversal).
 - `doc_neighbor`: expands around strongest chunks in top documents using ±`CONTEXT_EXPANSION_NEIGHBOR_WINDOW`.
 - `doc_neighbor_plus_links`: runs `doc_neighbor` and then adds bounded chunks from linked documents.
+  Linked-doc traversal is enabled only when base depth is low (sparse anchors) or document diversity is high relative to depth.
 
 ## Environment parameters
 
@@ -32,5 +33,6 @@
 - Strict token budget is enforced before prompt assembly.
 - Expansion caps are hard-bounded by `MAX_EXTRA_CHUNKS` and `MAX_LINK_DOCS`.
 - Near duplicates are dropped by cosine similarity threshold.
+- Final expanded context order is deterministic and continuity-preserving: `(document rank by best base score, chunk ordinal, chunk_id)`.
 - If links are absent or low-gain, selection stops without adding noisy chunks.
 - `retrieval_context_selection` log includes selection/budget timing and internal selection counters.
