@@ -32,3 +32,13 @@
 ## UI Conversational Layer
 
 Detailed implementation notes for Telegram and Web conversational UI layer are documented in `docs/implementation/ui_conversational_layer_v1.md`.
+
+
+## EPIC-7 release checkpoints
+
+Release hardening for `services/corporate-rag-service` follows stop points `REL-1..REL-4`:
+
+- Production Docker build: multi-stage image, clean runtime, env validation entrypoint.
+- Install scripts: `install.bat` and `deploy_docker_desktop.bat` enforce pause-on-error behavior.
+- Documentation: see `docs/architecture.md`, `docs/pipeline_trace.md`, `docs/observability.md`, `docs/security_and_access.md`.
+- Versioning: changelog maintained in `services/corporate-rag-service/CHANGELOG.md`.

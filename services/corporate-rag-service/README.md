@@ -68,3 +68,10 @@ Startup fails fast with `MODEL_CONTEXT_MISMATCH` when context window is incompat
 - **OBS-1 Health endpoints:** added `/health`, `/ready`, retained `/v1/health`, and provided compatibility aliases `/v1/ready` + `/v1/metrics`; readiness reports DB and model checks.
 - **OBS-2 Metrics:** added `/metrics` snapshot for `token_usage`, `coverage_ratio`, `clarification_rate`, `fallback_rate`; rates are emitted from the final `AgentPipeline` verdict path.
 - **OBS-3 Structured logs:** JSON logging now standardizes `request_id` and `stage` keys for every log record.
+
+
+## EPIC-7 release packaging
+
+- Production container now uses multi-stage build with runtime env validation (`docker-entrypoint.sh`).
+- Windows scripts `install.bat` and `deploy_docker_desktop.bat` include enforced pause-on-error rules.
+- Release docs are tracked in repository-level docs (`docs/architecture.md`, `docs/pipeline_trace.md`, `docs/observability.md`, `docs/security_and_access.md`).
