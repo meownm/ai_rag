@@ -75,7 +75,13 @@ class FakeDb:
             document_id = self.documents_by_version.get(version_id)
             return FakeResult([] if document_id is None else [{"document_id": document_id}])
         if "INSERT INTO documents" in stmt:
-            self.documents_by_version[payload.get("source_version_id")] = payload.get("document_id")
+            source_version_id = payload.get("source_version_id")
+            existing = self.documents_by_version.get(source_version_id)
+            if "ON CONFLICT" in stmt and existing is not None:
+                return FakeResult([])
+            self.documents_by_version[source_version_id] = payload.get("document_id")
+            if "RETURNING document_id" in stmt:
+                return FakeResult([{"document_id": payload.get("document_id")}])
             return FakeResult()
 
         if "SELECT chunk_id" in stmt and "FROM chunks" in stmt and "document_id" in stmt:
@@ -201,6 +207,7 @@ def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive(monkeypat
     sql_text = "\n".join(call[0] for call in db.calls)
     assert "INSERT INTO documents" in sql_text
     assert "INSERT INTO chunks" in sql_text
+    assert "INSERT INTO document_links (tenant_id, from_document_id" in sql_text
     assert "INSERT INTO cross_links" in sql_text
     assert "INSERT INTO source_versions" in sql_text
     assert "INSERT INTO chunk_vectors" in sql_text
@@ -313,6 +320,7 @@ def test_upsert_chunk_vectors_retries_then_succeeds(monkeypatch):
     sql_text = "\n".join(call[0] for call in db.calls)
     assert "LEFT JOIN chunk_vectors" in sql_text
     assert "ON CONFLICT (chunk_id) DO UPDATE" in sql_text
+    assert "updated_at = now()" in sql_text
 
 
 def test_upsert_chunk_vectors_raises_after_retries_exhausted(monkeypatch):
@@ -864,3 +872,229 @@ def test_fcs_sp6_deleted_file_marked_in_sync_state(monkeypatch):
 
     state = db.sync_state[(str(tenant), "FILE_CATALOG_OBJECT", "fs:a.md")]
     assert state["last_status"] == "deleted"
+
+
+def test_sp1_skip_tombstone_when_descriptor_listing_hits_cap(monkeypatch, caplog):
+    from app.services.connectors.base import SourceDescriptor
+
+    class FakeConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [
+                SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A"),
+                SourceDescriptor(source_type=self.source_type, external_ref="fs:b.md", title="B"),
+            ]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return type("R", (), {"error": None, "item": None, "raw_payload": None})()
+
+    class FakeRegistry:
+        def get(self, source_type):
+            return FakeConnector()
+
+    class FakeRepo:
+        deleted_calls = []
+
+        def __init__(self, _db):
+            pass
+
+        def get_state(self, *_args, **_kwargs):
+            return None
+
+        def list_external_refs(self, *_args, **_kwargs):
+            return ["fs:legacy.md"]
+
+        def mark_deleted(self, **kwargs):
+            self.deleted_calls.append(kwargs)
+
+        def mark_failure(self, **_kwargs):
+            return None
+
+        def mark_success(self, **_kwargs):
+            return None
+
+    class FakeSettings:
+        CONNECTOR_REGISTRY_ENABLED = True
+        CONNECTOR_SYNC_MAX_ITEMS_PER_RUN = 2
+        CONNECTOR_SYNC_PAGE_SIZE = 100
+        CONNECTOR_INCREMENTAL_ENABLED = True
+
+    monkeypatch.setattr("app.services.ingestion.settings", FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.SourceSyncStateRepository", FakeRepo)
+    monkeypatch.setattr("app.services.ingestion.ingest_source_items", lambda *_args, **_kwargs: {"documents": 0, "chunks": 0, "cross_links": 0, "artifacts": 0})
+
+    caplog.set_level("INFO")
+    ingest_sources_sync(db=object(), tenant_id=uuid.uuid4(), source_types=["FILE_CATALOG_OBJECT"], connector_registry=FakeRegistry())
+
+    assert FakeRepo.deleted_calls == []
+    assert any(rec.event == "connector_skip_tombstone_due_to_cap" for rec in caplog.records)
+
+
+def test_sp1_mark_tombstone_when_descriptor_listing_complete(monkeypatch):
+    from app.services.connectors.base import SourceDescriptor
+
+    class FakeConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return type("R", (), {"error": None, "item": None, "raw_payload": None})()
+
+    class FakeRegistry:
+        def get(self, source_type):
+            return FakeConnector()
+
+    class FakeRepo:
+        deleted_calls = []
+
+        def __init__(self, _db):
+            pass
+
+        def get_state(self, *_args, **_kwargs):
+            return None
+
+        def list_external_refs(self, *_args, **_kwargs):
+            return ["fs:a.md", "fs:legacy.md"]
+
+        def mark_deleted(self, **kwargs):
+            self.deleted_calls.append(kwargs)
+
+        def mark_failure(self, **_kwargs):
+            return None
+
+        def mark_success(self, **_kwargs):
+            return None
+
+    class FakeSettings:
+        CONNECTOR_REGISTRY_ENABLED = True
+        CONNECTOR_SYNC_MAX_ITEMS_PER_RUN = 2
+        CONNECTOR_SYNC_PAGE_SIZE = 100
+        CONNECTOR_INCREMENTAL_ENABLED = True
+
+    monkeypatch.setattr("app.services.ingestion.settings", FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.SourceSyncStateRepository", FakeRepo)
+    monkeypatch.setattr("app.services.ingestion.ingest_source_items", lambda *_args, **_kwargs: {"documents": 0, "chunks": 0, "cross_links": 0, "artifacts": 0})
+
+    ingest_sources_sync(db=object(), tenant_id=uuid.uuid4(), source_types=["FILE_CATALOG_OBJECT"], connector_registry=FakeRegistry())
+
+    assert len(FakeRepo.deleted_calls) == 1
+    assert FakeRepo.deleted_calls[0]["external_ref"] == "fs:legacy.md"
+
+
+def test_sp2_s3_keys_include_source_version_id(monkeypatch):
+    db = FakeDb()
+    storage = FakeStorage()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=storage)
+
+    keys = [key for _bucket, key, _payload in storage.put_calls]
+    assert any(key.endswith("/raw.txt") and key.count("/") >= 3 for key in keys)
+    assert any(key.endswith("/normalized.md") and key.count("/") >= 3 for key in keys)
+    assert any("/artifacts/ingestion.json" in key and key.count("/") >= 4 for key in keys)
+
+
+def test_sp2_different_source_versions_write_to_distinct_s3_paths(monkeypatch):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+
+    class MutableConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def __init__(self):
+            self.rev = 1
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint=f"v{self.rev}")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown=f"# A {self.rev}"))
+
+    class FakeRegistry:
+        def __init__(self, connector):
+            self.connector = connector
+
+        def get(self, source_type):
+            return self.connector
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    db = FakeDb()
+    storage = FakeStorage()
+    connector = MutableConnector()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    monkeypatch.setattr("app.services.ingestion.register_default_connectors", lambda: FakeRegistry(connector))
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+    connector.rev = 2
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+
+    markdown_keys = [key for bucket, key, _payload in storage.put_calls if bucket == "rag-markdown" and key.endswith("normalized.md")]
+    assert len(markdown_keys) == 2
+    assert markdown_keys[0] != markdown_keys[1]
+
+
+def test_sp4_insert_document_is_conflict_safe_and_returns_existing_id():
+    from app.services.ingestion import _insert_document
+
+    db = FakeDb()
+    tenant_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    source_version_id = uuid.uuid4()
+    item = SourceItem(source_type="CONFLUENCE_PAGE", external_ref="page:1", title="Doc", markdown="# Doc")
+
+    first_document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
+    second_document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
+
+    assert first_document_id == second_document_id
+    insert_calls = [sql for sql, _params in db.calls if "INSERT INTO documents" in sql]
+    assert insert_calls
+    assert "ON CONFLICT (tenant_id, source_version_id) DO NOTHING" in insert_calls[0]
+
+
+def test_sp5_document_links_insert_populates_tenant_id(monkeypatch):
+    db = FakeDb()
+    storage = FakeStorage()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=storage)
+
+    link_calls = [(sql, params) for sql, params in db.calls if "INSERT INTO document_links" in sql]
+    assert link_calls
+    assert all(call_params.get("tenant_id") == tenant for _sql, call_params in link_calls)
