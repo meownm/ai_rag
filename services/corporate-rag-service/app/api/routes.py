@@ -45,6 +45,7 @@ from app.services.audit import log_event
 from app.services.file_ingestion import FileByteIngestor
 from app.services.ingestion import ingest_source_items
 from app.services.performance import build_stage_budgets, exceeded_budgets
+from app.services.context_expansion import ContextExpansionEngine
 from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
@@ -691,10 +692,71 @@ def post_query(
         use_contextual_expansion=settings.USE_CONTEXTUAL_EXPANSION,
         neighbor_window=settings.NEIGHBOR_WINDOW,
     )
+    expansion_debug = {
+        "base_topk_count": min(len(tenant_safe_ranked), payload.top_k),
+        "base_candidates_doc_diversity": len({str(c.get("document_id")) for c in tenant_safe_ranked[: payload.top_k]}),
+        "expanded_chunks_count": len(chosen),
+        "expanded_from_neighbors_count": sum(1 for c in chosen if c.get("added_by_neighbor")),
+        "expanded_from_links_count": 0,
+        "redundancy_filtered_count": 0,
+        "final_context_token_estimate": sum(_estimate_token_count(str(c.get("chunk_text", ""))) for c in chosen),
+        "context_selection_steps": ["legacy_expand_neighbors"],
+    }
+    expansion_timing_ms = {"selection_ms": 0, "budget_ms": 0}
+
+    mode = settings.CONTEXT_EXPANSION_MODE.strip().lower()
+    expansion_enabled = settings.CONTEXT_EXPANSION_ENABLED and mode != "off"
+    if expansion_enabled:
+        t_expand0 = time.perf_counter()
+        engine = ContextExpansionEngine(TenantRepository(db, str(payload.tenant_id)))
+        chosen, debug_info = engine.expand(
+            final_query=resolved_query_text,
+            base_candidates=tenant_safe_ranked,
+            token_budget=settings.MAX_CONTEXT_TOKENS,
+            mode=mode,
+            query_embedding=query_embedding,
+        )
+        expansion_debug = {
+            "base_topk_count": debug_info.base_topk_count,
+            "base_candidates_doc_diversity": debug_info.base_candidates_doc_diversity,
+            "expanded_chunks_count": debug_info.expanded_chunks_count,
+            "expanded_from_neighbors_count": debug_info.expanded_from_neighbors_count,
+            "expanded_from_links_count": debug_info.expanded_from_links_count,
+            "redundancy_filtered_count": debug_info.redundancy_filtered_count,
+            "final_context_token_estimate": debug_info.final_context_token_estimate,
+            "context_selection_steps": debug_info.context_selection_steps,
+        }
+        emit_metric("context_expansion_enabled_count", 1)
+        emit_metric("context_expansion_added_chunks", max(0, len(chosen) - min(len(tenant_safe_ranked), settings.CONTEXT_EXPANSION_TOPK_BASE)))
+        emit_metric("context_expansion_redundancy_filtered", debug_info.redundancy_filtered_count)
+        if any(step.startswith("stop:budget") for step in debug_info.context_selection_steps):
+            emit_metric("context_expansion_budget_stop_count", 1)
+        expansion_timing_ms["selection_ms"] = int((time.perf_counter() - t_expand0) * 1000)
+
+    t_budget0 = time.perf_counter()
     chosen, budget_log = apply_context_budget(
         chosen,
         use_token_budget_assembly=settings.USE_TOKEN_BUDGET_ASSEMBLY,
         max_context_tokens=settings.MAX_CONTEXT_TOKENS,
+    )
+    expansion_timing_ms["budget_ms"] = int((time.perf_counter() - t_budget0) * 1000)
+    expansion_debug["final_context_token_estimate"] = int(budget_log.get("total_context_tokens_est", 0))
+
+    logger.info(
+        "retrieval_context_selection",
+        extra={
+            "event": "retrieval_context_selection",
+            "request_id": str(corr),
+            "tenant_id": str(payload.tenant_id),
+            "conversation_id": str(conversation_id) if conversation_id else None,
+            "query_id": str(corr),
+            "mode": mode,
+            "neighbor_window": settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW,
+            "max_docs": settings.CONTEXT_EXPANSION_MAX_DOCS,
+            "max_extra_chunks": settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS,
+            "timing": expansion_timing_ms,
+            **expansion_debug,
+        },
     )
 
     only_sources = "PASS"

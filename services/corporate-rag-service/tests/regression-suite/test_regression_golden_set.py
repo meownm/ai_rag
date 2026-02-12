@@ -46,12 +46,14 @@ def _run_retrieval(query: str, corpus: list[dict]) -> list[dict]:
 
 def test_golden_set_shape_and_size():
     golden_set = _load_golden()
-    assert len(golden_set) == 30
+    assert len(golden_set) == 31
     for item in golden_set:
         assert item["query"]
         assert item["expected_top_documents"]
         assert item["expected_citations"]
         assert 0 <= float(item["min_confidence"]) <= 1
+        if "expected_neighbor_chunk_id" in item:
+            assert item["expected_neighbor_chunk_id"]
 
 
 def test_retrieval_matches_regression_golden_set():
