@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-import logging
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import text
@@ -41,7 +40,8 @@ from app.services.agent_pipeline import (
     RetrievalAgentInput,
     RewriteAgentInput,
 )
-from app.services.audit import log_event
+from app.core.logging import get_request_id, log_event, set_request_context
+from app.services.audit import log_event as audit_log_event
 from app.services.file_ingestion import FileByteIngestor
 from app.services.ingestion import ingest_sources_sync
 from app.services.performance import build_stage_budgets, exceeded_budgets
@@ -58,7 +58,6 @@ from app.runners.conversation_summarizer import ConversationSummarizer
 from app.runners.query_rewriter import QueryRewriteError, QueryRewriter
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 rate_limiter = InMemoryRateLimiter(
@@ -207,7 +206,7 @@ def _is_debug_allowed(debug_requested: bool, user_role: str | None) -> bool:
     return (user_role or "").strip().lower() == settings.DEBUG_ADMIN_ROLE.strip().lower()
 
 
-def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int]:
+def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int, int, int]:
     repo = TenantRepository(db, tenant_id)
     k_lex = max(top_n, settings.DEFAULT_TOP_K, settings.HYBRID_MAX_FTS)
     k_vec = max(top_n, settings.RERANKER_TOP_K, settings.HYBRID_MAX_VECTOR)
@@ -220,7 +219,7 @@ def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: 
 
     chunk_ids = set(lexical_scores.keys()) | set(vector_score_map.keys())
     candidates = repo.hydrate_candidates(chunk_ids, lexical_scores, vector_score_map)
-    return candidates, lexical_ms
+    return candidates, lexical_ms, len(lexical_scores), len(vector_candidates)
 
 def _safe_uuid(value: object) -> uuid.UUID | None:
     try:
@@ -338,15 +337,7 @@ def ready(db: Session = Depends(get_db)) -> ReadinessResponse:
     model_check = _readiness_model_check()
     checks = {"db": db_check, "model": model_check}
     all_ok = all(item.ok for item in checks.values())
-    logger.info(
-        "readiness_check",
-        extra={
-            "request_id": request_id,
-            "stage": "readiness",
-            "db_ok": db_check.ok,
-            "model_ok": model_check.ok,
-        },
-    )
+    log_event("readiness_check", payload={"db_ok": db_check.ok, "model_ok": model_check.ok}, request_id=request_id, plane="control")
     return ReadinessResponse(
         status="ok" if all_ok else "degraded",
         version=settings.APP_VERSION,
@@ -358,7 +349,7 @@ def ready(db: Session = Depends(get_db)) -> ReadinessResponse:
 @router.get("/metrics", response_model=MetricsResponse)
 def metrics() -> MetricsResponse:
     request_id = str(uuid.uuid4())
-    logger.info("metrics_snapshot", extra={"request_id": request_id, "stage": "metrics"})
+    log_event("metrics_snapshot", payload={}, request_id=request_id, plane="control")
     return MetricsResponse(
         metrics={
             "token_usage": _summarize_metric("token_usage"),
@@ -484,6 +475,7 @@ def post_query(
 ) -> QueryResponse:
     corr = uuid.uuid4()
     t_start = time.perf_counter()
+    set_request_context(request_id=get_request_id(), tenant_id=str(payload.tenant_id))
 
     if not rate_limiter.allow(x_user_id or "anonymous"):
         raise _error("RATE_LIMIT_EXCEEDED", "Too many requests. Please retry later.", corr, True, status.HTTP_429_TOO_MANY_REQUESTS)
@@ -498,9 +490,9 @@ def post_query(
 
     safe_payload_log = payload.model_dump()
     safe_payload_log["query"] = safe_query
-    log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", safe_payload_log)
+    audit_log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", safe_payload_log)
     if prompt_security.malicious_instruction_detected:
-        log_event(
+        audit_log_event(
             db,
             str(payload.tenant_id),
             str(corr),
@@ -599,7 +591,7 @@ def post_query(
                     topic_similarity = 1.0
             if last_user_turn_text.strip() and should_reset_topic:
                 recent_turns = []
-                log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIM_THRESHOLD})
+                audit_log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIM_THRESHOLD})
             latest_summary = conversation_repo.get_latest_summary(conversation_id)
             summary_text = latest_summary.summary_text if latest_summary else None
         try:
@@ -633,7 +625,7 @@ def post_query(
                 log_stage_latency(stage="rewrite_agent", latency_ms=rewrite_ms, model_id=settings.REWRITE_MODEL_ID, request_id=str(corr))
                 emit_metric("rag_rewrite_latency", rewrite_ms)
         except (QueryRewriteError, ValueError, KeyError, json.JSONDecodeError) as exc:
-            log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "B-REWRITE-FAILED", "message": str(exc)})
+            audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "B-REWRITE-FAILED", "message": str(exc)})
             raise _error("B-REWRITE-FAILED", "Query rewrite failed", corr, True, status.HTTP_502_BAD_GATEWAY)
 
         if conversation_repo is not None and conversation_id is not None and user_turn is not None:
@@ -694,10 +686,10 @@ def post_query(
                 )
 
                 if pipeline_result.fallback_reason == "clarification_depth_exceeded":
-                    log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_depth, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
+                    audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_depth, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
 
                 if debug_enabled:
-                    log_event(
+                    audit_log_event(
                         db,
                         str(payload.tenant_id),
                         str(corr),
@@ -719,7 +711,7 @@ def post_query(
                 conversation_repo.create_turn(conversation_id, "assistant", pipeline_result.answer, meta=assistant_meta)
                 t_total_ms = int((time.perf_counter() - t_start) * 1000)
                 trace = {"trace_id": str(corr), "scoring_trace": []}
-                log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
+                audit_log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
                 return QueryResponse(
                     answer=pipeline_result.answer,
                     only_sources_verdict=pipeline_result.only_sources_verdict,
@@ -730,7 +722,7 @@ def post_query(
 
             elif should_ask and clarification_streak >= settings.MAX_CLARIFICATION_DEPTH:
                 fallback_message = "Похоже, недостаточно информации для ответа... Попробуйте уточнить вопрос и сузить область поиска."
-                log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_streak, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
+                audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_streak, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
                 conversation_repo.create_turn(conversation_id, "assistant", fallback_message, meta={"correlation_id": str(corr), "clarification_limit_exceeded": True})
                 return QueryResponse(
                     answer=fallback_message,
@@ -741,15 +733,15 @@ def post_query(
                 )
 
     try:
-        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": resolved_query_text, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
+        audit_log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": resolved_query_text, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
         query_embedding = get_embeddings_client().embed_text(resolved_query_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
-        log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_RESPONSE", {"dimensions": len(query_embedding)})
+        audit_log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_RESPONSE", {"dimensions": len(query_embedding)})
     except Exception as exc:  # noqa: BLE001
-        log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "EMBEDDINGS_HTTP_ERROR", "message": str(exc)})
+        audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "EMBEDDINGS_HTTP_ERROR", "message": str(exc)})
         raise _error("EMBEDDINGS_HTTP_ERROR", "Embeddings service call failed", corr, True, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     t_parse0 = time.perf_counter()
-    candidates, lexical_ms = _fetch_candidates(db, str(payload.tenant_id), resolved_query_text, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
+    candidates, lexical_ms, lexical_count, vector_count = _fetch_candidates(db, str(payload.tenant_id), resolved_query_text, query_embedding, max(payload.top_k, settings.RERANKER_TOP_K))
     t_parse_ms = int((time.perf_counter() - t_parse0) * 1000)
     if settings.ENABLE_PER_STAGE_LATENCY_METRICS:
         log_stage_latency(stage="retrieval_agent", latency_ms=t_parse_ms, model_id=settings.EMBEDDINGS_DEFAULT_MODEL_ID, request_id=str(corr))
@@ -835,21 +827,49 @@ def post_query(
     expansion_timing_ms["budget_ms"] = int((time.perf_counter() - t_budget0) * 1000)
     expansion_debug["final_context_token_estimate"] = int(budget_log.get("total_context_tokens_est", 0))
 
-    logger.info(
-        "retrieval_context_selection",
-        extra={
-            "event": "retrieval_context_selection",
-            "request_id": str(corr),
+    log_event(
+        "context.assembly",
+        payload={
             "tenant_id": str(payload.tenant_id),
-            "conversation_id": str(conversation_id) if conversation_id else None,
-            "query_id": str(corr),
-            "mode": mode,
-            "neighbor_window": settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW,
-            "max_docs": settings.CONTEXT_EXPANSION_MAX_DOCS,
-            "max_extra_chunks": settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS,
-            "timing": expansion_timing_ms,
-            **expansion_debug,
+            "tokens_system": 0,
+            "tokens_history": 0,
+            "tokens_retrieval": int(budget_log.get("total_context_tokens_est", 0)),
+            "tokens_query": _estimate_token_count(safe_query),
+            "tokens_total_before_trim": int(budget_log.get("total_context_tokens_est", 0)),
+            "tokens_trimmed_chunks": int(budget_log.get("trimmed_chunks_count", 0)),
+            "tokens_total_after_trim": int(budget_log.get("total_context_tokens_est", 0)),
+            "safety_margin": settings.TOKEN_BUDGET_SAFETY_MARGIN,
         },
+        plane="data",
+    )
+
+    log_event(
+        "retrieval.completed",
+        payload={
+            "tenant_id": str(payload.tenant_id),
+            "vector_candidates": vector_count,
+            "fts_candidates": lexical_count,
+            "hybrid_candidates": len(tenant_safe_ranked),
+            "top_k_selected": len(chosen),
+            "duration_ms": t_parse_ms + int(timers.get("t_vector_ms", 0)) + int(t_rerank),
+        },
+        plane="data",
+    )
+    log_event(
+        "retrieval.expansion",
+        payload={
+            "tenant_id": str(payload.tenant_id),
+            "expanded_total": int(expansion_debug.get("expanded_chunks_count", len(chosen))),
+            "expanded_per_doc": dict(sorted((expansion_debug.get("expanded_per_doc") or {}).items())),
+            "redundant_skipped": int(expansion_debug.get("redundancy_filtered_count", 0)),
+            "caps_used": {
+                "neighbor_window": settings.CONTEXT_EXPANSION_NEIGHBOR_WINDOW,
+                "max_docs": settings.CONTEXT_EXPANSION_MAX_DOCS,
+                "max_extra_chunks": settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS,
+            },
+            "timing": expansion_timing_ms,
+        },
+        plane="data",
     )
 
     only_sources = "PASS"
@@ -872,7 +892,7 @@ def post_query(
             request_log_payload = {"model": settings.LLM_MODEL, "keep_alive": settings.OLLAMA_KEEP_ALIVE_SECONDS, "num_ctx": settings.LLM_NUM_CTX, "prompt_tokens_est": llm_tokens_est}
             if _is_plain_log_mode():
                 request_log_payload["prompt"] = prompt
-            log_event(db, str(payload.tenant_id), str(corr), "LLM_REQUEST", request_log_payload)
+            audit_log_event(db, str(payload.tenant_id), str(corr), "LLM_REQUEST", request_log_payload)
             llm_payload = get_ollama_client().generate(prompt, keep_alive=settings.OLLAMA_KEEP_ALIVE_SECONDS)
             if isinstance(llm_payload, dict):
                 llm_raw = str(llm_payload.get("response", ""))
@@ -887,10 +907,12 @@ def post_query(
             }
             if _is_plain_log_mode():
                 response_log_payload["raw"] = llm_payload
-            log_event(db, str(payload.tenant_id), str(corr), "LLM_RESPONSE", response_log_payload)
+            audit_log_event(db, str(payload.tenant_id), str(corr), "LLM_RESPONSE", response_log_payload)
+            log_event("llm.call.completed", payload={"tenant_id": str(payload.tenant_id), "model": settings.LLM_MODEL, "provider": settings.LLM_PROVIDER, "num_ctx": settings.LLM_NUM_CTX, "prompt_tokens": llm_tokens_est, "completion_tokens": llm_completion_tokens_est, "total_tokens": llm_tokens_est + llm_completion_tokens_est, "latency_ms": int((time.perf_counter() - llm_start) * 1000), "keep_alive_seconds": settings.OLLAMA_KEEP_ALIVE_SECONDS, "retry_count": 0}, plane="data")
         except Exception as exc:  # noqa: BLE001
             llm_raw = ""
-            log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "LLM_PROVIDER_ERROR", "message": str(exc)})
+            audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "LLM_PROVIDER_ERROR", "message": str(exc)})
+            log_event("llm.call.error", level=40, payload={"tenant_id": str(payload.tenant_id), "error_category": "llm", "error_code": "LLM_PROVIDER_ERROR", "retryable": True}, plane="data")
         t_llm_ms = int((time.perf_counter() - llm_start) * 1000)
 
         parsed = _extract_json_payload(llm_raw)
@@ -958,7 +980,7 @@ def post_query(
     budgets = build_stage_budgets(settings.REQUEST_TIMEOUT_SECONDS, settings.EMBEDDINGS_TIMEOUT_SECONDS)
     exceeded = exceeded_budgets(perf, budgets)
     if exceeded:
-        log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"message": "perf_budget_exceeded", "exceeded": exceeded, "perf": perf, "budgets": budgets})
+        audit_log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"message": "perf_budget_exceeded", "exceeded": exceeded, "perf": perf, "budgets": budgets})
 
     response_confidence = 1.0
     if settings.USE_LLM_GENERATION:
@@ -1006,7 +1028,7 @@ def post_query(
     emit_metric("clarification_rate", clarification_rate)
     emit_metric("fallback_rate", fallback_rate)
     if debug_enabled:
-        log_event(
+        audit_log_event(
             db,
             str(payload.tenant_id),
             str(corr),
@@ -1028,10 +1050,12 @@ def post_query(
         trace_rows = _build_retrieval_trace_rows(conversation_id, user_turn.turn_id, tenant_safe_ranked, chosen)
         conversation_repo.create_retrieval_trace_items(trace_rows)
 
-    log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"stage": "FUSION_BOOST", "trace_id": trace["trace_id"], "scoring_trace": trace["scoring_trace"], "timing": perf})
-    log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
+    audit_log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"stage": "FUSION_BOOST", "trace_id": trace["trace_id"], "scoring_trace": trace["scoring_trace"], "timing": perf})
+    audit_log_event(db, str(payload.tenant_id), str(corr), "API_RESPONSE", trace, duration_ms=t_total_ms)
     if conversation_repo is not None and conversation_id is not None:
         conversation_repo.create_turn(conversation_id, "assistant", answer, meta={"correlation_id": str(corr)})
+
+    log_event("answer.audit", payload={"tenant_id": str(payload.tenant_id), "retrieved_chunk_ids": sorted([str(c.get("chunk_id")) for c in chosen]), "document_ids": sorted({str(c.get("document_id")) for c in chosen}), "source_version_ids": sorted({str(c.get("source_version_id")) for c in chosen if c.get("source_version_id")}), "model": settings.LLM_MODEL, "num_ctx": settings.LLM_NUM_CTX}, plane="data")
 
     return QueryResponse(
         answer=answer,

@@ -5,7 +5,11 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
+
+from app.core.logging import log_event
+from app.db.errors import DatabaseOperationError
 
 from app.models.models import (
     Chunks,
@@ -20,6 +24,38 @@ from app.models.models import (
     QueryResolutions,
     RetrievalTraceItems,
 )
+
+
+def _map_db_error(exc: Exception) -> tuple[str, str | None, bool]:
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    code_map = {
+        "23505": ("unique_violation", False),
+        "23503": ("foreign_key_violation", False),
+        "40P01": ("deadlock_detected", True),
+    }
+    error_code, retryable = code_map.get(str(sqlstate), ("database_error", False))
+    return error_code, sqlstate, retryable
+
+
+def _commit_or_raise(db: Session) -> None:
+    try:
+        db.commit()
+    except (IntegrityError, OperationalError) as exc:
+        db.rollback()
+        error_code, sqlstate, retryable = _map_db_error(exc)
+        log_event(
+            "error.occurred",
+            level=40,
+            payload={
+                "error_code": error_code,
+                "error_category": "database",
+                "sqlstate": sqlstate,
+                "retryable": retryable,
+            },
+            plane="data",
+        )
+        raise DatabaseOperationError(error_code=error_code, sqlstate=sqlstate, retryable=retryable) from exc
+
 
 
 class TenantRepository:
@@ -38,7 +74,7 @@ class TenantRepository:
             job_payload_json=payload,
         )
         self.db.add(job)
-        self.db.commit()
+        _commit_or_raise(self.db)
         self.db.refresh(job)
         return job
 
@@ -66,7 +102,7 @@ class TenantRepository:
         if status in {"done", "error", "canceled", "expired"}:
             job.finished_at = datetime.now(timezone.utc)
         self.db.add(job)
-        self.db.commit()
+        _commit_or_raise(self.db)
 
     def log_event(self, correlation_id: str, event_type: str, payload: dict, duration_ms: int | None = None) -> None:
         self.db.add(
@@ -78,7 +114,7 @@ class TenantRepository:
                 duration_ms=duration_ms,
             )
         )
-        self.db.commit()
+        _commit_or_raise(self.db)
 
     def fetch_lexical_candidate_scores(self, query: str, top_n: int) -> dict[str, float]:
         rows = self.db.execute(
@@ -420,7 +456,7 @@ class ConversationRepository:
     def create_conversation(self, conversation_id: uuid.UUID, status: str = "active") -> Conversations:
         conversation = Conversations(conversation_id=conversation_id, tenant_id=self.tenant_id, status=status)
         self.db.add(conversation)
-        self.db.commit()
+        _commit_or_raise(self.db)
         self.db.refresh(conversation)
         return conversation
 
@@ -428,12 +464,12 @@ class ConversationRepository:
         conversation.status = "archived"
         conversation.last_active_at = datetime.now(timezone.utc)
         self.db.add(conversation)
-        self.db.commit()
+        _commit_or_raise(self.db)
 
     def touch_conversation(self, conversation: Conversations) -> None:
         conversation.last_active_at = datetime.now(timezone.utc)
         self.db.add(conversation)
-        self.db.commit()
+        _commit_or_raise(self.db)
 
     def get_next_turn_index(self, conversation_id: uuid.UUID) -> int:
         turn = (
@@ -465,7 +501,7 @@ class ConversationRepository:
             meta=meta,
         )
         self.db.add(turn)
-        self.db.commit()
+        _commit_or_raise(self.db)
         self.db.refresh(turn)
         return turn
 
@@ -495,7 +531,7 @@ class ConversationRepository:
             clarification_question=clarification_question,
         )
         self.db.add(resolution)
-        self.db.commit()
+        _commit_or_raise(self.db)
         self.db.refresh(resolution)
         return resolution
 
@@ -520,7 +556,7 @@ class ConversationRepository:
             self.db.add(trace_item)
             created += 1
         if created > 0:
-            self.db.commit()
+            _commit_or_raise(self.db)
         return created
 
     def list_turns(self, conversation_id: uuid.UUID, limit: int = 50) -> list[ConversationTurns]:
@@ -605,7 +641,7 @@ class ConversationRepository:
             covers_turn_index_to=covers_turn_index_to,
         )
         self.db.add(summary)
-        self.db.commit()
+        _commit_or_raise(self.db)
         self.db.refresh(summary)
         return summary
 

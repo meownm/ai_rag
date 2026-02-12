@@ -67,7 +67,8 @@ Startup fails fast with `MODEL_CONTEXT_MISMATCH` when context window is incompat
 
 - **OBS-1 Health endpoints:** added `/health`, `/ready`, retained `/v1/health`, and provided compatibility aliases `/v1/ready` + `/v1/metrics`; readiness reports DB and model checks.
 - **OBS-2 Metrics:** added `/metrics` snapshot for `token_usage`, `coverage_ratio`, `clarification_rate`, `fallback_rate`; rates are emitted from the final `AgentPipeline` verdict path.
-- **OBS-3 Structured logs:** JSON logging now standardizes `request_id` and `stage` keys for every log record.
+- **OBS-3 Structured logs:** JSON logging now emits a unified envelope (`ts`, `service`, `event_type`, `request_id`, `tenant_id`, `plane`, etc.), plus per-request `api.request.completed` access events.
+- See: `docs/observability_logging.md`.
 
 
 ## EPIC-7 release packaging
