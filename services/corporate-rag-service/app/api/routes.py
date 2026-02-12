@@ -175,16 +175,28 @@ def _trim_history_turns(turns: list[dict]) -> list[dict]:
 
 
 
-def _has_invalid_citations(citations_from_model: object, allowed_pairs: set[tuple[str, str]]) -> bool:
+def _ground_citations(citations_from_model: object, allowed_pairs: set[tuple[str, str]]) -> tuple[list[dict], bool]:
     if not isinstance(citations_from_model, list):
-        return True
+        return [], True
+    grounded: list[dict] = []
+    removed = False
     for citation in citations_from_model:
         if not isinstance(citation, dict):
-            return True
+            removed = True
+            continue
         pair = (str(citation.get("chunk_id")), str(citation.get("document_id")))
-        if pair not in allowed_pairs:
-            return True
-    return False
+        if pair in allowed_pairs:
+            grounded.append(citation)
+        else:
+            removed = True
+    return grounded, removed
+
+
+def _assert_prompt_within_num_ctx(prompt: str) -> None:
+    prompt_tokens = _estimate_token_count(prompt)
+    max_prompt_tokens = max(1, int(settings.LLM_NUM_CTX) - int(settings.TOKEN_BUDGET_SAFETY_MARGIN))
+    if prompt_tokens > max_prompt_tokens:
+        raise ValueError("TOKEN_BUDGET_EXCEEDED")
 
 def _estimate_token_count(text: str) -> int:
     words = len(text.split())
@@ -886,6 +898,10 @@ def post_query(
         answer = _build_retrieval_only_answer(chosen)
     else:
         prompt = _build_llm_prompt(safe_query, chosen)
+        try:
+            _assert_prompt_within_num_ctx(prompt)
+        except ValueError:
+            raise _error("TOKEN_BUDGET_EXCEEDED", "Assembled prompt exceeds context window", corr, False, status.HTTP_422_UNPROCESSABLE_ENTITY)
         llm_tokens_est = _estimate_token_count(prompt)
         llm_start = time.perf_counter()
         try:
@@ -918,14 +934,16 @@ def post_query(
         parsed = _extract_json_payload(llm_raw)
         citations_from_model = parsed.get("citations") if isinstance(parsed, dict) else None
         allowed_pairs = {(str(c.get("chunk_id")), str(c.get("document_id"))) for c in chosen}
-        has_invalid_citation = _has_invalid_citations(citations_from_model, allowed_pairs)
+        grounded_citations, stripped_citations = _ground_citations(citations_from_model, allowed_pairs)
 
-        if parsed.get("status") != "success" or has_invalid_citation:
+        if parsed.get("status") != "success":
             answer = build_structured_refusal(str(corr), {"reason": "insufficient_evidence", "raw": llm_raw})
             anti_payload = {"refusal_triggered": True, "unsupported_sentences": 0}
             only_sources = "FAIL"
         else:
             answer = str(parsed.get("answer", "")).strip()
+            if stripped_citations:
+                log_event("citations.grounding_applied", payload={"tenant_id": str(payload.tenant_id), "stripped_count": max(0, len(citations_from_model or []) - len(grounded_citations))}, plane="data")
             valid, anti_payload = verify_answer(
                 answer,
                 [c["chunk_text"] for c in chosen],

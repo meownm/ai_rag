@@ -11,7 +11,7 @@ try:
 except Exception:  # noqa: BLE001
     boto3 = None
 
-from app.services.connectors.base import ConnectorError, ConnectorFetchResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
+from app.services.connectors.base import ConnectorError, ConnectorFetchResult, ConnectorListResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
 from app.services.file_ingestion import FileByteIngestor
 
 LOGGER = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class S3CatalogConnector(SourceConnector):
             return False, "S3_CATALOG_BUCKET is not configured"
         return True, None
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult:
         cfg = _load_settings()
         bucket = cfg.S3_CATALOG_BUCKET
         prefix = cfg.S3_CATALOG_PREFIX or ""
@@ -84,6 +84,7 @@ class S3CatalogConnector(SourceConnector):
         token: str | None = None
         descriptors: list[SourceDescriptor] = []
         seen: set[str] = set()
+        exhausted_listing = False
 
         while True:
             params: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": sync_context.page_size}
@@ -122,13 +123,17 @@ class S3CatalogConnector(SourceConnector):
             if len(descriptors) >= sync_context.max_items_per_run:
                 break
             if not response.get("IsTruncated"):
+                exhausted_listing = True
                 break
             token = response.get("NextContinuationToken")
             if not token:
+                exhausted_listing = True
                 break
 
         descriptors.sort(key=lambda d: str(d.metadata.get("key", "")))
-        return descriptors[: sync_context.max_items_per_run]
+        limited = descriptors[: sync_context.max_items_per_run]
+        listing_complete = exhausted_listing and len(limited) < sync_context.max_items_per_run
+        return ConnectorListResult(descriptors=limited, listing_complete=listing_complete)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         cfg = _load_settings()

@@ -48,13 +48,19 @@ class ConnectorFetchResult:
     raw_payload: bytes | None = None
 
 
+@dataclass(frozen=True)
+class ConnectorListResult:
+    descriptors: list[SourceDescriptor]
+    listing_complete: bool
+
+
 class SourceConnector(Protocol):
     source_type: str
 
     def is_configured(self) -> tuple[bool, str | None]:
         ...
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult | list[SourceDescriptor]:
         ...
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:

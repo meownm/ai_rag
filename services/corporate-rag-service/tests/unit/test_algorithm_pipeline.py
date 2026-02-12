@@ -235,7 +235,7 @@ def test_hybrid_rank_tie_breaks_by_source_preference_then_chunk_id(monkeypatch):
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 1},
     ]
     ranked, _ = hybrid_rank("policy", candidates, [1.0, 0.0], normalize_scores=True)
-    assert [c["chunk_id"] for c in ranked] == ["a", "b"]
+    assert [c["chunk_id"] for c in ranked] == ["b", "a"]
 
 
 def test_context_budget_respects_safety_margin_and_truncates_tail(monkeypatch):
@@ -248,3 +248,21 @@ def test_context_budget_respects_safety_margin_and_truncates_tail(monkeypatch):
     assert log["effective_context_tokens"] == 90
     assert log["final_tokens"] <= 90
     assert retained
+
+
+def test_hybrid_rank_is_stable_across_repeated_runs(monkeypatch):
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    candidates = [
+        {"chunk_id": "b", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 2},
+        {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 2},
+        {"chunk_id": "c", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 1},
+    ]
+
+    expected = None
+    for _ in range(10):
+        ranked, _ = hybrid_rank("policy", [dict(c) for c in candidates], [1.0, 0.0], normalize_scores=True)
+        ordering = [row["chunk_id"] for row in ranked]
+        if expected is None:
+            expected = ordering
+        assert ordering == expected

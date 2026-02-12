@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from app.services.connectors.base import ConnectorError, ConnectorFetchResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
+from app.services.connectors.base import ConnectorError, ConnectorFetchResult, ConnectorListResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
 from app.services.file_ingestion import FileByteIngestor
 
 LOGGER = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class FileCatalogConnector(SourceConnector):
                 if entry.is_file():
                     yield entry
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult:
         cfg = _load_settings()
         root = Path(cfg.FILE_CATALOG_ROOT_PATH).resolve()
         recursive = bool(cfg.FILE_CATALOG_RECURSIVE)
@@ -135,6 +135,7 @@ class FileCatalogConnector(SourceConnector):
                 extra={"event": "file_catalog_cap_exceeded", "files_scanned": len(descriptors), "max_items": sync_context.max_items_per_run},
             )
         final = descriptors[: sync_context.max_items_per_run]
+        listing_complete = len(descriptors) <= sync_context.max_items_per_run
         duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         LOGGER.info(
             "file_catalog_summary",
@@ -147,7 +148,7 @@ class FileCatalogConnector(SourceConnector):
                 "total_duration": duration_ms,
             },
         )
-        return final
+        return ConnectorListResult(descriptors=final, listing_complete=listing_complete)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
         full_path = Path(str(descriptor.metadata.get("abs_path", "")))
