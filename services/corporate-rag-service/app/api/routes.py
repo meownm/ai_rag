@@ -47,12 +47,21 @@ from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
 from app.services.scoring_trace import build_scoring_trace
+from app.services.security import InMemoryRateLimiter, sanitize_user_query
 from app.services.telemetry import emit_metric, log_stage_latency, metric_samples
 from app.runners.conversation_summarizer import ConversationSummarizer
 from app.runners.query_rewriter import QueryRewriteError, QueryRewriter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+rate_limiter = InMemoryRateLimiter(
+    window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
+    per_user_limit=settings.RATE_LIMIT_PER_USER,
+    burst_limit=settings.RATE_LIMIT_BURST,
+    max_users=settings.RATE_LIMIT_STORAGE_MAX_USERS,
+)
 
 @lru_cache
 def get_reranker() -> RerankerService:
@@ -141,6 +150,12 @@ def _build_retrieval_only_answer(contexts: list[dict]) -> str:
 
 def _is_plain_log_mode() -> bool:
     return settings.LOG_DATA_MODE.strip().lower() == "plain"
+
+
+def _is_debug_allowed(debug_requested: bool, user_role: str | None) -> bool:
+    if not debug_requested:
+        return False
+    return (user_role or "").strip().lower() == settings.DEBUG_ADMIN_ROLE.strip().lower()
 
 
 def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int]:
@@ -344,14 +359,41 @@ def post_query(
     db: Session = Depends(get_db),
     x_conversation_id: str | None = Header(default=None, alias="X-Conversation-Id"),
     x_client_turn_id: str | None = Header(default=None, alias="X-Client-Turn-Id"),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    x_user_role: str | None = Header(default=None, alias="X-User-Role"),
+    x_debug_mode: str | None = Header(default=None, alias="X-Debug-Mode"),
 ) -> QueryResponse:
     corr = uuid.uuid4()
     t_start = time.perf_counter()
+
+    if not rate_limiter.allow(x_user_id or "anonymous"):
+        raise _error("RATE_LIMIT_EXCEEDED", "Too many requests. Please retry later.", corr, True, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    debug_requested = (x_debug_mode or "").strip().lower() in {"1", "true", "yes", "on"}
+    if debug_requested and not _is_debug_allowed(debug_requested=True, user_role=x_user_role):
+        raise _error("DEBUG_FORBIDDEN", "Debug mode is allowed for admin role only", corr, False, status.HTTP_403_FORBIDDEN)
+    debug_enabled = _is_plain_log_mode() and _is_debug_allowed(debug_requested=debug_requested, user_role=x_user_role)
+
+    prompt_security = sanitize_user_query(payload.query)
+    safe_query = prompt_security.sanitized_query
+
     log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", payload.model_dump())
+    if prompt_security.malicious_instruction_detected:
+        log_event(
+            db,
+            str(payload.tenant_id),
+            str(corr),
+            "SECURITY_PROMPT_SANITIZED",
+            {
+                "malicious_instruction_detected": True,
+                "stripped_external_tool_directives": prompt_security.stripped_external_tool_directives,
+                "stripped_system_override_attempt": prompt_security.stripped_system_override_attempt,
+            },
+        )
 
     conversation_repo: ConversationRepository | None = None
     conversation_id: uuid.UUID | None = None
-    user_turn_text = payload.query
+    user_turn_text = safe_query
 
     if x_conversation_id:
         try:
@@ -400,7 +442,7 @@ def post_query(
                     covers_turn_index_to=max_turn_index,
                 )
 
-    resolved_query_text = payload.query
+    resolved_query_text = safe_query
     rewrite_result = None
     clarification_enabled = bool(settings.USE_CLARIFICATION_LOOP and settings.USE_LLM_QUERY_REWRITE and settings.USE_CONVERSATION_MEMORY)
     clarification_pending = False
@@ -433,7 +475,7 @@ def post_query(
             rewrite_result = get_query_rewriter().rewrite(
                 tenant_id=str(payload.tenant_id),
                 conversation_id=str(conversation_id) if conversation_id else None,
-                user_query=payload.query,
+                user_query=safe_query,
                 recent_turns=recent_turns,
                 summary=summary_text,
                 citation_hints=None,
@@ -486,9 +528,9 @@ def post_query(
                 pipeline = get_agent_pipeline()
                 pipeline_result = pipeline.run(
                     AgentPipelineRequest(
-                        query=payload.query,
+                        query=safe_query,
                         rewrite_input=RewriteAgentInput(
-                            query=payload.query,
+                            query=safe_query,
                             execute=lambda _q: {
                                 "resolved_query_text": resolved_query_text,
                                 "clarification_needed": bool(rewrite_result and rewrite_result.clarification_needed),
@@ -502,14 +544,14 @@ def post_query(
                             execute=lambda _items: {"selected_candidates": [], "confidence": 0.0},
                         ),
                         answer_input_builder=lambda selected_candidates: AnswerAgentInput(
-                            query=payload.query,
+                            query=safe_query,
                             selected_candidates=selected_candidates,
                             execute=lambda _q, _selected: {"answer": "", "only_sources_verdict": "PASS"},
                         ),
                         max_clarification_depth=settings.MAX_CLARIFICATION_DEPTH,
                         clarification_depth=clarification_depth,
                         confidence_fallback_threshold=-1.0,
-                        debug=_is_plain_log_mode(),
+                        debug=debug_enabled,
                     )
                 )
 
@@ -622,7 +664,7 @@ def post_query(
     elif not settings.USE_LLM_GENERATION:
         answer = _build_retrieval_only_answer(chosen)
     else:
-        prompt = _build_llm_prompt(payload.query, chosen)
+        prompt = _build_llm_prompt(safe_query, chosen)
         llm_tokens_est = _estimate_token_count(prompt)
         llm_start = time.perf_counter()
         try:
@@ -720,9 +762,9 @@ def post_query(
     pipeline = get_agent_pipeline()
     pipeline_result = pipeline.run(
         AgentPipelineRequest(
-            query=payload.query,
+            query=safe_query,
             rewrite_input=RewriteAgentInput(
-                query=payload.query,
+                query=safe_query,
                 execute=lambda _q: {
                     "resolved_query_text": resolved_query_text,
                     "clarification_needed": bool(rewrite_result and rewrite_result.clarification_needed),
@@ -736,14 +778,14 @@ def post_query(
                 execute=lambda _items: {"selected_candidates": chosen, "confidence": response_confidence},
             ),
             answer_input_builder=lambda selected_candidates: AnswerAgentInput(
-                query=payload.query,
+                query=safe_query,
                 selected_candidates=selected_candidates,
                 execute=lambda _q, _selected: {"answer": answer, "only_sources_verdict": only_sources},
             ),
             max_clarification_depth=settings.MAX_CLARIFICATION_DEPTH,
             clarification_depth=clarification_depth_for_pipeline,
             confidence_fallback_threshold=settings.CONFIDENCE_FALLBACK_THRESHOLD if settings.USE_LLM_GENERATION else -1.0,
-            debug=_is_plain_log_mode(),
+            debug=debug_enabled,
         )
     )
     answer = pipeline_result.answer

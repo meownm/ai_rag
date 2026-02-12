@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     MAX_EMBED_BATCH_SIZE: int = 64
     DEFAULT_TOP_K: int = 5
 
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_PER_USER: int = 30
+    RATE_LIMIT_BURST: int = 10
+    RATE_LIMIT_STORAGE_MAX_USERS: int = 10000
+
+    DEBUG_ADMIN_ROLE: str = "admin"
+
     MIN_SENTENCE_SIMILARITY: float = 0.65
     MIN_LEXICAL_OVERLAP: float = 0.25
 
