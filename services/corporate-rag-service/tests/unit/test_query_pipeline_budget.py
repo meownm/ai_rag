@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("pydantic")
+
 from app.services.query_pipeline import TRUNCATION_MARKER, apply_context_budget, estimate_tokens
 
 
@@ -36,3 +38,14 @@ def test_apply_context_budget_token_mode_truncates_top_chunk_negative():
 def test_apply_context_budget_rejects_word_based_fallback_negative():
     with pytest.raises(ValueError, match="Word-based context trimming"):
         apply_context_budget([], use_token_budget_assembly=False)
+
+
+def test_apply_context_budget_logs_initial_trimmed_final_tokens():
+    chunks = [
+        {"chunk_id": "1", "chunk_text": "a " * 400, "final_score": 1.0},
+        {"chunk_id": "2", "chunk_text": "b " * 400, "final_score": 0.1},
+    ]
+    retained, log = apply_context_budget(chunks, use_token_budget_assembly=True, max_context_tokens=300)
+    assert retained
+    assert log["initial_tokens"] >= log["final_tokens"]
+    assert log["trimmed_tokens"] == log["initial_tokens"] - log["final_tokens"]

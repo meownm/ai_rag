@@ -67,3 +67,43 @@ At startup the service now:
 
 - Added `tenant_id` to `document_links` with migration backfill from `documents` and index `ix_document_links_tenant_id`.
 - Link insertion now writes `tenant_id` on every row, enabling tenant-scoped joins and preventing cross-tenant leakage.
+
+## v1.1 Quality Hardening
+
+### SP1 — Nested DOCX list hierarchy
+
+- Ordered list numbering is now tracked independently per `(numId, ilvl)` from DOCX XML to prevent flattening and cross-level counter bleed.
+- Three-level bullet, numbered, and mixed list structures are covered by ingestion tests.
+
+### SP2 — Deterministic hybrid scoring
+
+- Hybrid retrieval now uses configurable weighted merge (`HYBRID_WEIGHT_VECTOR=0.7`, `HYBRID_WEIGHT_FTS=0.3` by default).
+- Vector and FTS scores are normalized into `[0,1]` before merge when normalization is enabled.
+- Candidate deduplication by `chunk_id` happens before ranking, and final ordering is deterministic: `final_score DESC`, `chunk_id ASC`.
+
+### SP3 — Document-aware context expansion caps
+
+- Added `CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC` to avoid over-expanding one document.
+- Expansion debug now reports `expanded_total` and per-document counts via `expanded_per_doc`.
+
+### SP4 — Strict context token budget enforcement
+
+- Context assembly re-computes token totals and deterministically trims lowest-scored chunks until within budget.
+- Budget logs include `initial_tokens`, `trimmed_tokens`, and `final_tokens` for diagnostics.
+
+### SP5/SP6 — Conversation history controls
+
+- Added strict bounds: `MAX_HISTORY_TURNS` and `MAX_HISTORY_TOKENS`.
+- Topic reset heuristic compares embedding similarity between current query and previous user turn; when below `TOPIC_RESET_SIMILARITY_THRESHOLD`, history is excluded from rewrite context and `topic_reset` is logged.
+
+### SP7 — Citation safety
+
+- LLM citation payload is validated against retrieved `chunk_id` set.
+- Any citation outside retrieved chunks is treated as invalid and triggers insufficient-evidence handling.
+
+### Review follow-up hardening
+
+- Hybrid merge now exposes `hybrid_score` and sets `final_score` strictly by weighted normalized vector/FTS formula for deterministic reproducibility.
+- Added stronger hybrid settings validation (`0..1` bounds + exact sum to `1.0`).
+- Neighbor-only expansion mode now also reports per-document expansion counters in debug metrics.
+- Added integration coverage for deterministic `hybrid_rank -> apply_context_budget` flow and topic-reset/citation-safety guard behavior.

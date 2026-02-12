@@ -220,3 +220,29 @@ def test_budget_stop_recorded_when_chunk_overflow(monkeypatch):
 
     assert selected == []
     assert any(step.startswith("stop:budget") for step in debug.context_selection_steps)
+
+
+def test_doc_neighbor_per_doc_cap_and_metrics(monkeypatch):
+    repo = FakeRepo()
+    doc_a, doc_b = str(uuid.uuid4()), str(uuid.uuid4())
+    base = [_cand("a1", doc_a, 2, 0.9, [1, 0]), _cand("b1", doc_b, 2, 0.8, [0, 1])]
+    repo.neighbors[(doc_a, "a1", 1)] = [_cand("a0", doc_a, 1, 0.2, [1, 0.1]), _cand("a2", doc_a, 3, 0.2, [1, 0.2])]
+    repo.neighbors[(doc_b, "b1", 1)] = [_cand("b0", doc_b, 1, 0.2, [0.1, 1]), _cand("b2", doc_b, 3, 0.2, [0.2, 1])]
+
+    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS", 3)
+    monkeypatch.setattr("app.services.context_expansion.settings.CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC", 1)
+
+    selected, debug = ContextExpansionEngine(repo).expand(
+        final_query="q",
+        base_candidates=base,
+        token_budget=200,
+        mode="doc_neighbor",
+        query_embedding=[1, 0],
+    )
+
+    ids = {c["chunk_id"] for c in selected}
+    assert len({"a0", "a2"} & ids) == 1
+    assert len({"b0", "b2"} & ids) == 1
+    assert debug.expanded_total == 2
+    assert debug.expanded_per_doc[doc_a] == 1
+    assert debug.expanded_per_doc[doc_b] == 1

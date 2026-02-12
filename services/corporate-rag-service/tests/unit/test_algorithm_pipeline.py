@@ -186,3 +186,43 @@ def test_hybrid_rank_with_normalization_adds_raw_and_norm_fields():
         assert 0.0 <= entry["lex_norm"] <= 1.0
         assert 0.0 <= entry["vec_norm"] <= 1.0
         assert 0.0 <= entry["rerank_norm"] <= 1.0
+
+
+def test_hybrid_rank_deduplicates_before_sort_and_uses_chunk_id_tiebreak(monkeypatch):
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
+    candidates = [
+        {"chunk_id": "b", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 0.5, "rerank_score": 0.0},
+        {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 0.5, "rerank_score": 0.0},
+        {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 0.2, "vec_score": 0.4, "rerank_score": 0.0},
+    ]
+
+    ranked, _ = hybrid_rank("policy", candidates, [1.0, 0.0], normalize_scores=True)
+    assert [row["chunk_id"] for row in ranked] == ["a", "b"]
+
+
+def test_hybrid_rank_applies_configured_weighted_merge(monkeypatch):
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.9)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.1)
+    candidates = [
+        {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 10.0, "vec_score": 0.1, "rerank_score": 0.0},
+        {"chunk_id": "b", "chunk_text": "policy", "embedding": [0.0, 1.0], "lex_score": 0.1, "vec_score": 0.9, "rerank_score": 0.0},
+    ]
+
+    ranked, _ = hybrid_rank("policy", candidates, [1.0, 0.0], normalize_scores=True)
+    assert ranked[0]["chunk_id"] == "b"
+    assert 0.0 <= ranked[0]["hybrid_score"] <= 1.0
+
+
+def test_hybrid_rank_final_score_matches_weighted_formula(monkeypatch):
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
+    candidates = [
+        {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 0.2, "vec_score": 0.8, "rerank_score": 0.6},
+        {"chunk_id": "b", "chunk_text": "policy", "embedding": [0.0, 1.0], "lex_score": 0.6, "vec_score": 0.2, "rerank_score": 0.1},
+    ]
+
+    ranked, _ = hybrid_rank("policy", candidates, [1.0, 0.0], normalize_scores=True)
+    for row in ranked:
+        expected = (0.7 * row["vec_norm"]) + (0.3 * row["lex_norm"])
+        assert row["final_score"] == pytest.approx(expected)
