@@ -809,6 +809,13 @@ def _log_ingest_event(db: Session, tenant_id: uuid.UUID, event_type: str, payloa
     )
 
 
+def _build_embedding_text(chunk_path: str, chunk_text: str) -> str:
+    path = chunk_path.strip()
+    if not path:
+        return chunk_text
+    return f"[H] {path}\n{chunk_text}"
+
+
 def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uuid.UUID]) -> None:
     if not chunk_ids:
         return
@@ -821,7 +828,7 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
     query_result = db.execute(
         _sql(
             """
-            SELECT c.chunk_id, c.chunk_text
+            SELECT c.chunk_id, c.chunk_path, c.chunk_text
             FROM chunks c
             LEFT JOIN chunk_vectors cv ON cv.chunk_id = c.chunk_id
             WHERE c.tenant_id = :tenant_id
@@ -843,7 +850,7 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
     for i in range(0, len(rows), batch_size):
         batch = rows[i : i + batch_size]
         t0 = datetime.now(timezone.utc)
-        texts = [str(row["chunk_text"]) for row in batch]
+        texts = [_build_embedding_text(str(row.get("chunk_path") or ""), str(row["chunk_text"])) for row in batch]
         correlation_id = str(uuid.uuid4())
         _log_ingest_event(
             db,
@@ -894,13 +901,14 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
             db.execute(
                 _sql(
                     """
-                    INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim)
-                    VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim)
+                    INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim, embedding_input_mode)
+                    VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim, :embedding_input_mode)
                     ON CONFLICT (chunk_id) DO UPDATE
                     SET tenant_id = EXCLUDED.tenant_id,
                         embedding_model = EXCLUDED.embedding_model,
                         embedding = EXCLUDED.embedding,
                         embedding_dim = EXCLUDED.embedding_dim,
+                        embedding_input_mode = EXCLUDED.embedding_input_mode,
                         updated_at = now()
                     """
                 ),
@@ -910,6 +918,7 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
                     "embedding_model": model_id,
                     "embedding": "[" + ",".join(f"{float(x):.8f}" for x in emb) + "]",
                     "embedding_dim": len(emb),
+                    "embedding_input_mode": "path_text_v2",
                 },
             )
         elapsed_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
@@ -966,37 +975,33 @@ def _upsert_fts_for_chunks(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uu
     _log_ingest_event(db, tenant_id, "PIPELINE_STAGE", {"stage": "INDEX_BM25", "chunks_indexed": len(chunk_ids)})
 
 
-def ingest_sources_sync(
+def ingest_source_items(
     db: Session,
     tenant_id: uuid.UUID,
-    source_types: list[str],
-    confluence: ConfluenceCrawler | None = None,
-    file_catalog: FileCatalogCrawler | None = None,
+    items: list[SourceItem],
     storage: StorageAdapter | None = None,
+    raw_payloads: dict[str, bytes] | None = None,
 ) -> dict[str, int]:
-    confluence = confluence or NoopConfluenceCrawler()
-    file_catalog = file_catalog or NoopFileCatalogCrawler()
     storage = storage or _default_storage()
-
-    items: list[SourceItem] = []
-    if "CONFLUENCE_PAGE" in source_types or "CONFLUENCE_ATTACHMENT" in source_types:
-        items.extend(confluence.crawl(tenant_id))
-    if "FILE_CATALOG_OBJECT" in source_types:
-        items.extend(file_catalog.crawl(tenant_id))
+    raw_payloads = raw_payloads or {}
 
     docs = chunks = links = artifacts = 0
     for item in items:
         markdown = normalize_to_markdown(item.markdown)
         source_id = _upsert_source(db, tenant_id, item)
 
-        raw_key = f"{tenant_id}/{source_id}/raw.txt"
-        md_key = f"{tenant_id}/{source_id}/normalized.md"
         cfg = _load_settings()
+        raw_payload = raw_payloads.get(item.external_ref)
+        raw_key = f"{tenant_id}/{source_id}/raw.bin" if raw_payload is not None else f"{tenant_id}/{source_id}/raw.txt"
+        md_key = f"{tenant_id}/{source_id}/normalized.md"
 
         checksum = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         source_version_id = _find_source_version_id(db, source_id, checksum)
         if source_version_id is None:
-            raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
+            if raw_payload is not None and hasattr(storage, "put_bytes"):
+                raw_uri = storage.put_bytes(cfg.S3_BUCKET_RAW, raw_key, raw_payload)
+            else:
+                raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
             md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
             source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri)
         else:
@@ -1032,3 +1037,23 @@ def ingest_sources_sync(
     if hasattr(db, "commit"):
         db.commit()
     return {"documents": docs, "chunks": chunks, "cross_links": links, "artifacts": artifacts}
+
+
+def ingest_sources_sync(
+    db: Session,
+    tenant_id: uuid.UUID,
+    source_types: list[str],
+    confluence: ConfluenceCrawler | None = None,
+    file_catalog: FileCatalogCrawler | None = None,
+    storage: StorageAdapter | None = None,
+) -> dict[str, int]:
+    confluence = confluence or NoopConfluenceCrawler()
+    file_catalog = file_catalog or NoopFileCatalogCrawler()
+
+    items: list[SourceItem] = []
+    if "CONFLUENCE_PAGE" in source_types or "CONFLUENCE_ATTACHMENT" in source_types:
+        items.extend(confluence.crawl(tenant_id))
+    if "FILE_CATALOG_OBJECT" in source_types:
+        items.extend(file_catalog.crawl(tenant_id))
+
+    return ingest_source_items(db, tenant_id, items, storage=storage)

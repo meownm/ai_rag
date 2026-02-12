@@ -10,7 +10,10 @@ export function JobsTable({ jobs, onSelect }: { jobs: JobStatusResponse[]; onSel
         {jobs.map((job) => (
           <button key={job.job_id} type="button" className="flex w-full justify-between rounded border p-2" onClick={() => onSelect(job.job_id)}>
             <span>{job.job_id}</span>
-            <Badge value={job.job_status} />
+            <div className="flex items-center gap-2">
+              <span>{job.result?.chunks ?? 0} chunks</span>
+              <Badge value={job.job_status} />
+            </div>
           </button>
         ))}
       </div>

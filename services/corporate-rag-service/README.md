@@ -75,3 +75,10 @@ Startup fails fast with `MODEL_CONTEXT_MISMATCH` when context window is incompat
 - Production container now uses multi-stage build with runtime env validation (`docker-entrypoint.sh`).
 - Windows scripts `install.bat` and `deploy_docker_desktop.bat` include enforced pause-on-error rules.
 - Release docs are tracked in repository-level docs (`docs/architecture.md`, `docs/pipeline_trace.md`, `docs/observability.md`, `docs/security_and_access.md`).
+
+
+## Runtime notes
+
+- Start async ingestion worker separately: `python -m app.workers.ingest_worker`.
+- New ingestion endpoints: `POST /v1/ingest/sources/sync`, `GET /v1/jobs/recent`, `POST /v1/ingest/files/upload`.
+- LLM runtime env: `LLM_NUM_CTX` (65536/131072/262144), `OLLAMA_KEEP_ALIVE_SECONDS` (default 20).

@@ -7,7 +7,7 @@ from functools import lru_cache
 
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from app.schemas.api import (
     ReadinessCheck,
     ReadinessResponse,
     JobAcceptedResponse,
+    JobListResponse,
     JobStatusResponse,
     QueryRequest,
     QueryResponse,
@@ -41,7 +42,8 @@ from app.services.agent_pipeline import (
     RewriteAgentInput,
 )
 from app.services.audit import log_event
-from app.services.ingestion import EmbeddingIndexingError, ingest_sources_sync
+from app.services.file_ingestion import FileByteIngestor
+from app.services.ingestion import ingest_source_items
 from app.services.performance import build_stage_budgets, exceeded_budgets
 from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
@@ -323,19 +325,41 @@ def metrics() -> MetricsResponse:
 @router.post("/v1/ingest/sources/sync", response_model=JobAcceptedResponse, status_code=202)
 def start_source_sync(payload: SourceSyncRequest, db: Session = Depends(get_db)) -> JobAcceptedResponse:
     repo = TenantRepository(db, payload.tenant_id)
-    job = repo.create_job(job_type="REINDEX_ALL", requested_by="api")
-
-    try:
-        ingest_sources_sync(db, payload.tenant_id, payload.source_types)
-        repo.mark_job(job, "done")
-    except EmbeddingIndexingError as exc:
-        repo.mark_job(job, "error", error_code="S-EMB-INDEX-FAILED", error_message=str(exc))
-        raise _error("S-EMB-INDEX-FAILED", "Embedding indexing failed", uuid.uuid4(), True, status.HTTP_502_BAD_GATEWAY)
-    except Exception as exc:  # noqa: BLE001
-        repo.mark_job(job, "error", error_code="SOURCE_FETCH_FAILED", error_message=str(exc))
-        raise
-
+    job = repo.create_job(
+        job_type="REINDEX_ALL",
+        requested_by="api",
+        payload={"source_types": payload.source_types, "force_reindex": payload.force_reindex},
+    )
     return JobAcceptedResponse(job_id=job.job_id, job_status=job.job_status)
+
+
+@router.get("/v1/jobs/recent", response_model=JobListResponse)
+def get_recent_jobs(tenant_id: uuid.UUID, limit: int = 20, db: Session = Depends(get_db)) -> JobListResponse:
+    safe_limit = max(1, min(limit, 100))
+    jobs = (
+        db.query(IngestJobs)
+        .filter(IngestJobs.tenant_id == tenant_id)
+        .order_by(IngestJobs.started_at.desc())
+        .limit(safe_limit)
+        .all()
+    )
+    return JobListResponse(
+        jobs=[
+            JobStatusResponse(
+                job_id=job.job_id,
+                tenant_id=job.tenant_id,
+                job_type=job.job_type,
+                job_status=job.job_status,
+                requested_by=job.requested_by,
+                started_at=job.started_at,
+                finished_at=job.finished_at,
+                error_code=job.error_code,
+                error_message=job.error_message,
+                result=job.result_json,
+            )
+            for job in jobs
+        ]
+    )
 
 
 @router.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
@@ -350,7 +374,26 @@ def get_job(job_id: uuid.UUID, db: Session = Depends(get_db)) -> JobStatusRespon
         job_status=job.job_status,
         requested_by=job.requested_by,
         started_at=job.started_at,
+        finished_at=job.finished_at,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        result=job.result_json,
     )
+
+
+@router.post("/v1/ingest/files/upload", response_model=JobAcceptedResponse, status_code=202)
+async def upload_file_for_ingestion(
+    tenant_id: uuid.UUID = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> JobAcceptedResponse:
+    content = await file.read()
+    item = FileByteIngestor().ingest_bytes(filename=file.filename or "upload.bin", payload=content)
+    counters = ingest_source_items(db, tenant_id, [item], raw_payloads={item.external_ref: content})
+    repo = TenantRepository(db, tenant_id)
+    job = repo.create_job(job_type="REINDEX_ALL", requested_by="upload", payload={"source_types": ["FILE_UPLOAD_OBJECT"]})
+    repo.mark_job(job, "done", result_payload=counters)
+    return JobAcceptedResponse(job_id=job.job_id, job_status=job.job_status)
 
 
 @router.post("/v1/query", response_model=QueryResponse)
@@ -671,11 +714,11 @@ def post_query(
         llm_tokens_est = _estimate_token_count(prompt)
         llm_start = time.perf_counter()
         try:
-            request_log_payload = {"model": settings.LLM_MODEL, "keep_alive": 0, "prompt_tokens_est": llm_tokens_est}
+            request_log_payload = {"model": settings.LLM_MODEL, "keep_alive": settings.OLLAMA_KEEP_ALIVE_SECONDS, "num_ctx": settings.LLM_NUM_CTX, "prompt_tokens_est": llm_tokens_est}
             if _is_plain_log_mode():
                 request_log_payload["prompt"] = prompt
             log_event(db, str(payload.tenant_id), str(corr), "LLM_REQUEST", request_log_payload)
-            llm_payload = get_ollama_client().generate(prompt, keep_alive=0)
+            llm_payload = get_ollama_client().generate(prompt, keep_alive=settings.OLLAMA_KEEP_ALIVE_SECONDS)
             if isinstance(llm_payload, dict):
                 llm_raw = str(llm_payload.get("response", ""))
             else:
@@ -683,7 +726,8 @@ def post_query(
             llm_completion_tokens_est = _estimate_token_count(llm_raw)
             response_log_payload = {
                 "model": settings.LLM_MODEL,
-                "keep_alive": 0,
+                "keep_alive": settings.OLLAMA_KEEP_ALIVE_SECONDS,
+                "num_ctx": settings.LLM_NUM_CTX,
                 "completion_tokens_est": llm_completion_tokens_est,
             }
             if _is_plain_log_mode():

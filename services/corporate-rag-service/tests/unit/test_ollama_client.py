@@ -37,6 +37,7 @@ def test_generate_includes_keep_alive_zero(monkeypatch):
 
     assert response == {"response": "ok"}
     assert recorder.payload["keep_alive"] == 0
+    assert recorder.payload["options"]["num_ctx"] == client.num_ctx
 
 
 def test_generate_accepts_custom_keep_alive(monkeypatch):
