@@ -388,5 +388,19 @@
       }
     ],
     "min_confidence": 0.45
+  },
+  {
+    "query": "Пограничный заголовок: соседний абзац политики",
+    "expected_top_documents": [
+      "doc-context-001"
+    ],
+    "expected_citations": [
+      {
+        "doc_id": "doc-context-001",
+        "chunk_id": "ctx-001-c02"
+      }
+    ],
+    "expected_neighbor_chunk_id": "ctx-001-c03",
+    "min_confidence": 0.45
   }
 ]

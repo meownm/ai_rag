@@ -14,6 +14,7 @@ from app.models.models import (
     Conversations,
     ConversationTurns,
     Documents,
+    DocumentLinks,
     EventLogs,
     IngestJobs,
     QueryResolutions,
@@ -241,6 +242,130 @@ class TenantRepository:
                 if len(neighbors) >= cap:
                     break
         return neighbors
+
+    def fetch_chunk_by_id(self, chunk_id: str) -> dict | None:
+        row = (
+            self.db.query(Chunks, Documents, ChunkVectors)
+            .join(Documents, Documents.document_id == Chunks.document_id)
+            .join(ChunkVectors, ChunkVectors.chunk_id == Chunks.chunk_id)
+            .filter(Chunks.tenant_id == self.tenant_id)
+            .filter(Documents.tenant_id == self.tenant_id)
+            .filter(ChunkVectors.tenant_id == self.tenant_id)
+            .filter(Chunks.chunk_id == chunk_id)
+            .first()
+        )
+        if row is None:
+            return None
+        chunk, document, vector = row
+        return self._row_to_candidate(chunk, document, vector, 0.0, 0.0)
+
+    def fetch_document_neighbors(self, document_id: str, anchor_chunk_id: str, window: int = 1) -> list[dict]:
+        if window < 0:
+            return []
+        anchor = (
+            self.db.query(Chunks)
+            .filter(Chunks.tenant_id == self.tenant_id)
+            .filter(Chunks.document_id == document_id)
+            .filter(Chunks.chunk_id == anchor_chunk_id)
+            .first()
+        )
+        if anchor is None:
+            return []
+
+        min_ord = int(anchor.ordinal) - int(window)
+        max_ord = int(anchor.ordinal) + int(window)
+        rows = (
+            self.db.query(Chunks, Documents, ChunkVectors)
+            .join(Documents, Documents.document_id == Chunks.document_id)
+            .join(ChunkVectors, ChunkVectors.chunk_id == Chunks.chunk_id)
+            .filter(Chunks.tenant_id == self.tenant_id)
+            .filter(Documents.tenant_id == self.tenant_id)
+            .filter(ChunkVectors.tenant_id == self.tenant_id)
+            .filter(Chunks.document_id == document_id)
+            .filter(Chunks.ordinal >= min_ord)
+            .filter(Chunks.ordinal <= max_ord)
+            .order_by(Chunks.ordinal.asc(), Chunks.chunk_id.asc())
+            .all()
+        )
+        return [self._row_to_candidate(chunk, document, vector, 0.0, 0.0) for chunk, document, vector in rows]
+
+    def fetch_outgoing_linked_documents(self, document_ids: list[str], max_docs: int) -> list[str]:
+        if not document_ids or max_docs <= 0:
+            return []
+        rows = (
+            self.db.query(DocumentLinks.to_document_id)
+            .join(Documents, Documents.document_id == DocumentLinks.to_document_id)
+            .filter(DocumentLinks.from_document_id.in_(document_ids))
+            .filter(DocumentLinks.to_document_id.isnot(None))
+            .filter(Documents.tenant_id == self.tenant_id)
+            .order_by(DocumentLinks.to_document_id.asc())
+            .limit(max_docs)
+            .all()
+        )
+        return [str(row[0]) for row in rows if row[0] is not None]
+
+    def fetch_top_chunks_for_document(self, document_id: str, query_embedding: list[float], limit_n: int = 2) -> list[dict]:
+        if limit_n <= 0:
+            return []
+        vector_literal = self._to_vector_literal(query_embedding)
+        rows = self.db.execute(
+            text(
+                """
+                SELECT c.chunk_id,
+                       c.document_id,
+                       c.chunk_text,
+                       c.chunk_path,
+                       c.ordinal,
+                       c.token_count,
+                       d.title,
+                       d.author,
+                       d.url,
+                       d.labels,
+                       d.updated_date,
+                       cv.embedding,
+                       (1.0 / (1.0 + (cv.embedding <-> CAST(:qvec AS vector)))) AS vec_score
+                FROM chunks c
+                JOIN documents d ON d.document_id = c.document_id
+                JOIN chunk_vectors cv ON cv.chunk_id = c.chunk_id
+                WHERE c.tenant_id = CAST(:tenant_id AS uuid)
+                  AND d.tenant_id = CAST(:tenant_id AS uuid)
+                  AND cv.tenant_id = CAST(:tenant_id AS uuid)
+                  AND c.document_id = CAST(:document_id AS uuid)
+                ORDER BY cv.embedding <-> CAST(:qvec AS vector), c.ordinal ASC, c.chunk_id ASC
+                LIMIT :limit_n
+                """
+            ),
+            {
+                "tenant_id": self.tenant_id,
+                "document_id": document_id,
+                "qvec": vector_literal,
+                "limit_n": limit_n,
+            },
+        ).mappings().all()
+        items: list[dict] = []
+        for row in rows:
+            labels = self._labels_to_list(row["labels"])
+            items.append(
+                {
+                    "chunk_id": str(row["chunk_id"]),
+                    "document_id": row["document_id"],
+                    "chunk_text": row["chunk_text"],
+                    "title": row["title"],
+                    "url": row["url"] or "",
+                    "heading_path": row["chunk_path"].split("/") if row["chunk_path"] else [],
+                    "labels": labels,
+                    "author": row["author"],
+                    "updated_at": row["updated_date"].isoformat() if row["updated_date"] else "",
+                    "tenant_id": self.tenant_id,
+                    "ordinal": int(row["ordinal"]),
+                    "token_count": int(row["token_count"] or 0),
+                    "embedding": list(row["embedding"]),
+                    "lex_score": 0.0,
+                    "vec_score": float(row["vec_score"] or 0.0),
+                    "final_score": float(row["vec_score"] or 0.0),
+                }
+            )
+        return items
 
     @staticmethod
     def _labels_to_list(labels: object) -> list[str]:
