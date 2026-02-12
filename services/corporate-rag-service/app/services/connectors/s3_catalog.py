@@ -132,7 +132,7 @@ class S3CatalogConnector(SourceConnector):
 
         descriptors.sort(key=lambda d: str(d.metadata.get("key", "")))
         limited = descriptors[: sync_context.max_items_per_run]
-        listing_complete = exhausted_listing and len(limited) < sync_context.max_items_per_run
+        listing_complete = exhausted_listing
         return ConnectorListResult(descriptors=limited, listing_complete=listing_complete)
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:

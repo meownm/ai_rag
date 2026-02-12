@@ -153,3 +153,33 @@ def test_golden_neighbor_expectations_are_expandable():
         )
 
         assert expected_neighbor in {c["chunk_id"] for c in selected}
+
+
+def test_retrieval_prefers_higher_source_preference_for_equal_scores():
+    ranked, _ = hybrid_rank(
+        "policy",
+        candidates=[
+            {
+                "chunk_id": "chunk-low",
+                "document_id": "doc-low",
+                "chunk_text": "policy",
+                "embedding": [1.0, 0.0],
+                "lex_score": 1.0,
+                "vec_score": 1.0,
+                "source_preference": 1,
+            },
+            {
+                "chunk_id": "chunk-high",
+                "document_id": "doc-high",
+                "chunk_text": "policy",
+                "embedding": [1.0, 0.0],
+                "lex_score": 1.0,
+                "vec_score": 1.0,
+                "source_preference": 9,
+            },
+        ],
+        query_embedding=[1.0, 0.0],
+        normalize_scores=False,
+    )
+
+    assert [row["chunk_id"] for row in ranked] == ["chunk-high", "chunk-low"]

@@ -1,4 +1,4 @@
-from app.services.storage import ObjectStorage, StorageConfig
+from app.services.storage import ObjectStorage, StorageConfig, VersionOverwriteError
 
 
 class FakeBody:
@@ -80,8 +80,96 @@ def test_s3_immutable_put_rejects_overwrite(monkeypatch):
 
     import pytest
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(VersionOverwriteError):
         storage.put_bytes_immutable("raw-bucket", "tenant/src/ver/raw.bin", payload, checksum_hex=checksum)
+
+
+def test_s3_text_immutable_rejects_overwrite_with_deterministic_error(monkeypatch):
+    fake_client = FakeS3Client()
+
+    class FakeBoto3:
+        @staticmethod
+        def client(*_args, **_kwargs):
+            return fake_client
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "boto3":
+            return FakeBoto3
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    storage = ObjectStorage(StorageConfig(endpoint="http://localhost:9000", access_key="x", secret_key="y", region="us-east-1", secure=False))
+    text = "immutable-text"
+    import hashlib
+
+    checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    storage.put_text_immutable("raw-bucket", "tenant/src/ver/markdown.md", text, checksum_hex=checksum)
+
+    import pytest
+
+    with pytest.raises(VersionOverwriteError):
+        storage.put_text_immutable("raw-bucket", "tenant/src/ver/markdown.md", text, checksum_hex=checksum)
+
+
+def test_s3_put_bytes_rejects_manual_overwrite_for_versioned_raw_key(monkeypatch):
+    fake_client = FakeS3Client()
+
+    class FakeBoto3:
+        @staticmethod
+        def client(*_args, **_kwargs):
+            return fake_client
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "boto3":
+            return FakeBoto3
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    storage = ObjectStorage(StorageConfig(endpoint="http://localhost:9000", access_key="x", secret_key="y", region="us-east-1", secure=False))
+    raw_key = "tenant/src/ver/raw.bin"
+    storage.put_bytes("raw-bucket", raw_key, b"first")
+
+    import pytest
+
+    with pytest.raises(VersionOverwriteError):
+        storage.put_bytes("raw-bucket", raw_key, b"second")
+
+
+def test_s3_put_bytes_allows_overwrite_for_non_versioned_key(monkeypatch):
+    fake_client = FakeS3Client()
+
+    class FakeBoto3:
+        @staticmethod
+        def client(*_args, **_kwargs):
+            return fake_client
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "boto3":
+            return FakeBoto3
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    storage = ObjectStorage(StorageConfig(endpoint="http://localhost:9000", access_key="x", secret_key="y", region="us-east-1", secure=False))
+    uri = storage.put_bytes("raw-bucket", "tenant/nonversioned/raw.bin", b"first")
+    uri_2 = storage.put_bytes("raw-bucket", "tenant/nonversioned/raw.bin", b"second")
+
+    assert uri == "s3://raw-bucket/tenant/nonversioned/raw.bin"
+    assert uri_2 == "s3://raw-bucket/tenant/nonversioned/raw.bin"
 
 
 def test_s3_immutable_put_rejects_checksum_mismatch(monkeypatch):

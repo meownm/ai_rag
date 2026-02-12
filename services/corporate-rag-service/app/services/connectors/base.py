@@ -62,7 +62,7 @@ class SourceConnector(Protocol):
     def is_configured(self) -> tuple[bool, str | None]:
         ...
 
-    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult | list[SourceDescriptor]:
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> ConnectorListResult:
         ...
 
     def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:

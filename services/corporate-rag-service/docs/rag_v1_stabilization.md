@@ -44,8 +44,8 @@ At startup the service now:
 
 ### SP1 — Tombstone safety on capped listings
 
-- Connector tombstone deletion now runs only when listing is complete (`len(descriptors) < CONNECTOR_SYNC_MAX_ITEMS_PER_RUN`).
-- When listing hits cap, tombstone is skipped and structured event `connector_skip_tombstone_due_to_cap` is emitted.
+- Connector tombstone deletion now runs only when connector contract explicitly returns `listing_complete=true`.
+- Any non-authoritative listing (`listing_complete=false`) skips tombstone deletion regardless of descriptor count.
 
 ### SP2 — Version-aware S3 object layout
 
@@ -111,7 +111,7 @@ At startup the service now:
 ## Quality hardening updates
 
 - DOCX ingestion now keeps consecutive list paragraphs as a single markdown list block and supports configurable indentation via `DOCX_LIST_INDENT_SPACES`.
-- Hybrid retrieval uses normalized channels in `[0,1]`, weighted by `HYBRID_W_VECTOR` and `HYBRID_W_FTS`, with deterministic tie-break `(final desc, source_preference asc, chunk_id asc)`.
+- Hybrid retrieval uses normalized channels in `[0,1]`, weighted by `HYBRID_W_VECTOR` and `HYBRID_W_FTS`, with deterministic tie-break `(final desc, source_preference desc, chunk_id asc)`.
 - Candidate windows are configurable with `HYBRID_MAX_VECTOR` and `HYBRID_MAX_FTS`.
 - Context expansion is controlled by `EXPAND_NEIGHBORS_ENABLED`, `EXPAND_NEIGHBORS_WINDOW`, `EXPAND_MAX_EXTRA_TOTAL`, and `EXPAND_MAX_EXTRA_PER_DOC`.
 - Token budget enforcement applies `TOKEN_BUDGET_SAFETY_MARGIN` and deterministic tail truncation when needed.
@@ -122,6 +122,7 @@ At startup the service now:
 ## INT-SP2 Immutable Versioned Storage
 
 - Raw payload is stored only as immutable `raw.bin` under `tenant_id/source_id/source_version_id/`.
+- Manual writes to versioned raw keys (`tenant/source/source_version/raw.bin`) and immutable object rewrites now fail fast with deterministic `VersionOverwriteError` when key already exists.
 - Ingestion requires immutable storage methods (`put_bytes_immutable`, `put_text_immutable`) and fails fast if unavailable.
 - `source_versions.checksum` is enforced from raw content bytes to avoid duplicate identical versions while preserving new versions for changed content.
 - Existing historical data remains readable because persisted `s3_raw_uri`/`s3_markdown_uri` values are unchanged (no destructive migration).
