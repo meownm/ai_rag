@@ -579,12 +579,13 @@ def _insert_source_version(
     checksum: str,
     s3_raw_uri: str,
     s3_markdown_uri: str,
+    source_version_id: uuid.UUID | None = None,
 ) -> tuple[uuid.UUID, bool]:
     existing_version_id = _find_source_version_id(db, source_id, checksum)
     if existing_version_id is not None:
         return existing_version_id, False
 
-    source_version_id = uuid.uuid4()
+    source_version_id = source_version_id or uuid.uuid4()
     insert_result = db.execute(
         _sql(
             """
@@ -656,7 +657,7 @@ def _list_existing_chunk_ids(db: Session, document_id: uuid.UUID) -> list[uuid.U
 
 def _insert_document(db: Session, tenant_id: uuid.UUID, source_id: uuid.UUID, source_version_id: uuid.UUID, item: SourceItem) -> uuid.UUID:
     document_id = uuid.uuid4()
-    db.execute(
+    result = db.execute(
         _sql(
             """
             INSERT INTO documents (
@@ -664,6 +665,8 @@ def _insert_document(db: Session, tenant_id: uuid.UUID, source_id: uuid.UUID, so
             ) VALUES (
                 :document_id, :tenant_id, :source_id, :source_version_id, :title, :author, :updated_date, :url, CAST(:labels AS jsonb)
             )
+            ON CONFLICT (tenant_id, source_version_id) DO NOTHING
+            RETURNING document_id
             """
         ),
         {
@@ -678,6 +681,13 @@ def _insert_document(db: Session, tenant_id: uuid.UUID, source_id: uuid.UUID, so
             "labels": json.dumps(item.labels),
         },
     )
+    if hasattr(result, "mappings"):
+        row = result.mappings().first()
+        if row and row.get("document_id"):
+            return row["document_id"]
+    existing_document_id = _get_existing_document_id(db, source_version_id)
+    if existing_document_id is not None:
+        return existing_document_id
     return document_id
 
 
@@ -728,18 +738,18 @@ def _insert_chunks(db: Session, tenant_id: uuid.UUID, document_id: uuid.UUID, so
     return chunk_ids
 
 
-def _insert_links(db: Session, document_id: uuid.UUID, links: list[str]) -> int:
+def _insert_links(db: Session, tenant_id: uuid.UUID, document_id: uuid.UUID, links: list[str]) -> int:
     created = 0
     for link_url in links:
         db.execute(
             _sql(
                 """
-                INSERT INTO document_links (from_document_id, to_document_id, link_url, link_type)
-                VALUES (:from_document_id, NULL, :link_url, 'CONFLUENCE_PAGE_LINK')
+                INSERT INTO document_links (tenant_id, from_document_id, to_document_id, link_url, link_type)
+                VALUES (:tenant_id, :from_document_id, NULL, :link_url, 'CONFLUENCE_PAGE_LINK')
                 ON CONFLICT DO NOTHING
                 """
             ),
-            {"from_document_id": document_id, "link_url": link_url},
+            {"tenant_id": tenant_id, "from_document_id": document_id, "link_url": link_url},
         )
         db.execute(
             _sql(
@@ -749,7 +759,7 @@ def _insert_links(db: Session, document_id: uuid.UUID, links: list[str]) -> int:
                 ON CONFLICT DO NOTHING
                 """
             ),
-            {"from_document_id": document_id, "link_url": link_url},
+            {"tenant_id": tenant_id, "from_document_id": document_id, "link_url": link_url},
         )
         created += 1
     return created
@@ -957,18 +967,19 @@ def ingest_source_items(
 
         cfg = _load_settings()
         raw_payload = raw_payloads.get(item.external_ref)
-        raw_key = f"{tenant_id}/{source_id}/raw.bin" if raw_payload is not None else f"{tenant_id}/{source_id}/raw.txt"
-        md_key = f"{tenant_id}/{source_id}/normalized.md"
 
         checksum = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         source_version_id = _find_source_version_id(db, source_id, checksum)
         if source_version_id is None:
+            source_version_id = uuid.uuid4()
+            raw_key = f"{tenant_id}/{source_id}/{source_version_id}/raw.bin" if raw_payload is not None else f"{tenant_id}/{source_id}/{source_version_id}/raw.txt"
+            md_key = f"{tenant_id}/{source_id}/{source_version_id}/normalized.md"
             if raw_payload is not None and hasattr(storage, "put_bytes"):
                 raw_uri = storage.put_bytes(cfg.S3_BUCKET_RAW, raw_key, raw_payload)
             else:
                 raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
             md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
-            source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri)
+            source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri, source_version_id=source_version_id)
         else:
             created_source_version = False
         document_id = _get_existing_document_id(db, source_version_id)
@@ -977,9 +988,9 @@ def ingest_source_items(
             document_id = _insert_document(db, tenant_id, source_id, source_version_id, item)
             chunk_ids = _insert_chunks(db, tenant_id, document_id, source_version_id, markdown)
             links_found = extract_links(markdown)
-            links += _insert_links(db, document_id, links_found)
+            links += _insert_links(db, tenant_id, document_id, links_found)
 
-            artifact_key = f"{tenant_id}/{source_id}/artifacts/ingestion.json"
+            artifact_key = f"{tenant_id}/{source_id}/{source_version_id}/artifacts/ingestion.json"
             artifact = {
                 "source_id": str(source_id),
                 "source_version_id": str(source_version_id),
@@ -1046,6 +1057,7 @@ def ingest_sources_sync(
     descriptor_by_ref: dict[str, SourceDescriptor] = {}
     raw_payloads: dict[str, bytes] = {}
     seen_refs_by_source_type: dict[str, set[str]] = {}
+    listing_complete_by_source_type: dict[str, bool] = {}
     counters = {
         "descriptors_listed": 0,
         "items_fetched": 0,
@@ -1057,8 +1069,10 @@ def ingest_sources_sync(
     for source_type in source_types:
         connector = connector_registry.get(source_type)
         descriptors = connector.list_descriptors(str(tenant_id), sync_context)[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
+        listing_complete = len(descriptors) < settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN
         counters["descriptors_listed"] += len(descriptors)
         seen_refs_by_source_type[source_type] = {d.external_ref for d in descriptors}
+        listing_complete_by_source_type[source_type] = listing_complete
         LOGGER.info("connector_list_descriptors", extra={"source_type": source_type, "descriptors": len(descriptors), "event": "connector_list_descriptors"})
         for descriptor in descriptors:
             state = repo.get_state(str(tenant_id), descriptor.source_type, descriptor.external_ref)
@@ -1093,7 +1107,21 @@ def ingest_sources_sync(
             if result.raw_payload is not None:
                 raw_payloads[result.item.external_ref] = result.raw_payload
 
-    for source_type, seen_refs in seen_refs_by_source_type.items():
+    for source_type in source_types:
+        seen_refs = seen_refs_by_source_type.get(source_type, set())
+        listing_complete = listing_complete_by_source_type.get(source_type, True)
+        if not listing_complete:
+            LOGGER.info(
+                "connector_skip_tombstone_due_to_cap",
+                extra={
+                    "event": "connector_skip_tombstone_due_to_cap",
+                    "tenant_id": str(tenant_id),
+                    "source_type": source_type,
+                    "max_items_per_run": settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN,
+                    "descriptors_listed": len(seen_refs),
+                },
+            )
+            continue
         previous_refs = set(repo.list_external_refs(str(tenant_id), source_type))
         deleted_refs = previous_refs - seen_refs
         for external_ref in sorted(deleted_refs):

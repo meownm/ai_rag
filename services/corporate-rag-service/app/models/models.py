@@ -53,8 +53,11 @@ class TenantSettings(Base):
 
 class Documents(Base):
     __tablename__ = "documents"
+    __table_args__ = (UniqueConstraint("tenant_id", "source_version_id", name="uq_documents_tenant_source_version"),)
     document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("sources.source_id"), nullable=True)
+    source_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("source_versions.source_version_id"), nullable=True)
     title: Mapped[str] = mapped_column(String(512))
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
@@ -86,6 +89,7 @@ class ChunkVectors(Base):
     embedding = mapped_column(Vector(1024))
     embedding_dim: Mapped[int] = mapped_column(Integer)
     embedding_input_mode: Mapped[str] = mapped_column(String(32), default="path_text_v1")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class IngestJobs(Base):
@@ -198,6 +202,7 @@ class SourceVersions(Base):
 
 class DocumentLinks(Base):
     __tablename__ = "document_links"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     from_document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     to_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     link_url: Mapped[str] = mapped_column(String(2048), primary_key=True)

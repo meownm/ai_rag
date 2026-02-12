@@ -39,3 +39,31 @@ At startup the service now:
 
 - `run_local.bat` reads `PORT` from `.env`, sets window title, prints Swagger URL before `uvicorn` startup, and pauses on error.
 - `deploy_docker_desktop.bat` reads `RAG_SERVICE_PORT` from `.env`, avoids hardcoded port assumptions, prints Swagger URL, and pauses on error.
+
+## Production Critical Hardening
+
+### SP1 — Tombstone safety on capped listings
+
+- Connector tombstone deletion now runs only when listing is complete (`len(descriptors) < CONNECTOR_SYNC_MAX_ITEMS_PER_RUN`).
+- When listing hits cap, tombstone is skipped and structured event `connector_skip_tombstone_due_to_cap` is emitted.
+
+### SP2 — Version-aware S3 object layout
+
+- New ingestion writes raw, markdown, and artifact objects under `tenant_id/source_id/source_version_id/...`.
+- Different `source_version_id` values produce deterministic, distinct S3 paths for auditability.
+- Existing versions remain backward-compatible because persisted URIs in `source_versions` are still used for retrieval.
+
+### SP3 — `chunk_vectors.updated_at` consistency
+
+- Added `updated_at timestamptz NOT NULL DEFAULT now()` to `chunk_vectors` via Alembic migration.
+- ORM model now includes `updated_at`, aligned with vector UPSERT logic (`updated_at = now()` on conflict).
+
+### SP4 — Unique document per source version
+
+- Added DB unique constraint `uq_documents_tenant_source_version (tenant_id, source_version_id)` with migration-time duplicate cleanup that first re-links dependent rows (`chunks`, `document_links`, `cross_links`) to the kept document to preserve existing data.
+- `_insert_document` now uses `INSERT ... ON CONFLICT DO NOTHING RETURNING document_id`; on conflict it resolves existing `document_id` without creating duplicates.
+
+### SP5 — Tenant isolation in `document_links`
+
+- Added `tenant_id` to `document_links` with migration backfill from `documents` and index `ix_document_links_tenant_id`.
+- Link insertion now writes `tenant_id` on every row, enabling tenant-scoped joins and preventing cross-tenant leakage.
