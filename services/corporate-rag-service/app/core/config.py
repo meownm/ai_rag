@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     FILE_CATALOG_RECURSIVE: bool = True
     FILE_CATALOG_ALLOWED_EXTENSIONS: str = ".pdf,.docx,.txt,.md"
     FILE_CATALOG_MAX_FILE_MB: int = 50
+    FILE_CATALOG_HARD_DELETE_ENABLED: bool = False
 
     S3_CATALOG_BUCKET: str = ""
     S3_CATALOG_PREFIX: str = ""

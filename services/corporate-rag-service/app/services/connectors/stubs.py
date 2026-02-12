@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from app.core.config import settings
+from types import SimpleNamespace
+
+
+def _load_settings():
+    try:
+        from app.core.config import settings
+
+        return settings
+    except Exception:  # noqa: BLE001
+        return SimpleNamespace(
+            CONFLUENCE_BASE_URL="",
+            CONFLUENCE_AUTH_MODE="pat",
+            CONFLUENCE_PAT="",
+            S3_CATALOG_BUCKET="",
+        )
 from app.services.connectors.base import ConnectorError, ConnectorFetchResult, SourceConnector, SourceDescriptor, SyncContext
 
 
@@ -8,6 +22,7 @@ class ConfluenceConnector(SourceConnector):
     source_type = "CONFLUENCE_PAGE"
 
     def is_configured(self) -> tuple[bool, str | None]:
+        settings = _load_settings()
         if not settings.CONFLUENCE_BASE_URL:
             return False, "CONFLUENCE_BASE_URL is not configured"
         if settings.CONFLUENCE_AUTH_MODE == "pat" and not settings.CONFLUENCE_PAT:

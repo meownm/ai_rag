@@ -25,3 +25,10 @@ Decision rule:
 - else skip
 
 This keeps re-runs idempotent and deterministic for identical snapshots.
+
+
+## Confluence page connector
+
+Confluence pages are synced with paging-safe two-step fetch:
+1. list page descriptors from search endpoint without body expansion;
+2. fetch each page body by id with configured representation (`storage`/`view`) and normalize HTML to markdown.

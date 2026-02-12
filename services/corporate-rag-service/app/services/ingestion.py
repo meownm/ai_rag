@@ -29,7 +29,34 @@ class EmbeddingIndexingError(Exception):
     pass
 
 
-from app.core.config import settings
+from types import SimpleNamespace
+
+try:
+    from app.core.config import settings
+except Exception:  # noqa: BLE001
+    settings = SimpleNamespace(
+        S3_ENDPOINT="http://localhost:9000",
+        S3_ACCESS_KEY="minio",
+        S3_SECRET_KEY="minio123",
+        S3_REGION="us-east-1",
+        S3_SECURE=False,
+        S3_BUCKET_RAW="rag-raw",
+        S3_BUCKET_MARKDOWN="rag-markdown",
+        EMBEDDINGS_SERVICE_URL="http://localhost:8200",
+        EMBEDDINGS_TIMEOUT_SECONDS=30,
+        EMBEDDINGS_BATCH_SIZE=64,
+        EMBEDDINGS_RETRY_ATTEMPTS=3,
+        EMBEDDINGS_DEFAULT_MODEL_ID="bge-m3",
+        CHUNK_TARGET_TOKENS=650,
+        CHUNK_MAX_TOKENS=900,
+        CHUNK_MIN_TOKENS=120,
+        CHUNK_OVERLAP_TOKENS=80,
+        CONNECTOR_REGISTRY_ENABLED=True,
+        CONNECTOR_SYNC_MAX_ITEMS_PER_RUN=5000,
+        CONNECTOR_SYNC_PAGE_SIZE=100,
+        CONNECTOR_INCREMENTAL_ENABLED=True,
+    )
+
 from app.db.repositories.source_sync_state import SourceSyncStateRepository
 from app.services.connectors import register_default_connectors
 from app.services.connectors.base import SourceDescriptor, SourceItem, SyncContext
@@ -138,9 +165,8 @@ def _canonical_chunk_text(text: str) -> str:
 
 
 def _token_count(text: str) -> int:
-    from app.core.config import settings
-
-    return token_count(text, estimator=getattr(settings, "TOKEN_ESTIMATOR", "split"))
+    cfg = _load_settings()
+    return token_count(text, estimator=getattr(cfg, "TOKEN_ESTIMATOR", "split"))
 
 
 def _is_table_separator_line(line: str) -> bool:
@@ -1024,7 +1050,7 @@ def ingest_sources_sync(
     file_catalog: Any | None = None,
     storage: StorageAdapter | None = None,
 ) -> dict[str, int]:
-    if not settings.CONNECTOR_REGISTRY_ENABLED:
+    if (confluence is not None or file_catalog is not None) or not settings.CONNECTOR_REGISTRY_ENABLED:
         items: list[SourceItem] = []
         if confluence and ("CONFLUENCE_PAGE" in source_types or "CONFLUENCE_ATTACHMENT" in source_types):
             items.extend(confluence.crawl(tenant_id))
@@ -1040,6 +1066,8 @@ def ingest_sources_sync(
     )
     repo = SourceSyncStateRepository(db)
     items: list[SourceItem] = []
+    descriptor_by_ref: dict[str, SourceDescriptor] = {}
+    seen_refs_by_source_type: dict[str, set[str]] = {}
     counters = {
         "descriptors_listed": 0,
         "items_fetched": 0,
@@ -1054,11 +1082,20 @@ def ingest_sources_sync(
         connector = connector_registry.get(source_type)
         descriptors = connector.list_descriptors(str(tenant_id), sync_context)[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
         counters["descriptors_listed"] += len(descriptors)
+        seen_refs_by_source_type[source_type] = {d.external_ref for d in descriptors}
         LOGGER.info("connector_list_descriptors", extra={"source_type": source_type, "descriptors": len(descriptors), "event": "connector_list_descriptors"})
         for descriptor in descriptors:
             state = repo.get_state(str(tenant_id), descriptor.source_type, descriptor.external_ref)
             if not should_fetch(descriptor, state, settings.CONNECTOR_INCREMENTAL_ENABLED):
                 counters["items_skipped_incremental"] += 1
+                LOGGER.info(
+                    "file_catalog_skip_incremental",
+                    extra={
+                        "event": "file_catalog_skip_incremental",
+                        "source_type": descriptor.source_type,
+                        "external_ref": descriptor.external_ref,
+                    },
+                )
                 continue
             result = connector.fetch_item(str(tenant_id), descriptor)
             if result.error or result.item is None:
@@ -1075,18 +1112,31 @@ def ingest_sources_sync(
                 )
                 continue
             counters["items_fetched"] += 1
+            descriptor_by_ref[descriptor.external_ref] = descriptor
             items.append(result.item)
+
+    for source_type, seen_refs in seen_refs_by_source_type.items():
+        previous_refs = set(repo.list_external_refs(str(tenant_id), source_type))
+        deleted_refs = previous_refs - seen_refs
+        for external_ref in sorted(deleted_refs):
+            repo.mark_deleted(
+                tenant_id=str(tenant_id),
+                source_type=source_type,
+                external_ref=external_ref,
+                last_synced_at=datetime.now(timezone.utc),
+            )
 
     ingest_result = ingest_source_items(db, tenant_id, items, storage=storage)
     counters["items_ingested"] = ingest_result["documents"]
 
     for item in items:
+        desc = descriptor_by_ref.get(item.external_ref)
         repo.mark_success(
             tenant_id=str(tenant_id),
             source_type=item.source_type,
             external_ref=item.external_ref,
-            last_seen_modified_at=None,
-            last_seen_checksum=None,
+            last_seen_modified_at=(desc.last_modified if desc else None),
+            last_seen_checksum=(desc.checksum_hint if desc else None),
             last_synced_at=datetime.now(timezone.utc),
         )
 

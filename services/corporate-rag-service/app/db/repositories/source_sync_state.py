@@ -83,6 +83,33 @@ class SourceSyncStateRepository:
             },
         )
 
+
+    def list_external_refs(self, tenant_id: str, source_type: str) -> list[str]:
+        result = self.db.execute(
+            """
+            SELECT external_ref
+            FROM source_sync_state
+            WHERE tenant_id = :tenant_id AND source_type = :source_type
+            """,
+            {"tenant_id": tenant_id, "source_type": source_type},
+        )
+        if not hasattr(result, "mappings"):
+            return []
+        return [str(row.get("external_ref")) for row in result.mappings().all() if row.get("external_ref")]
+
+    def mark_deleted(self, *, tenant_id: str, source_type: str, external_ref: str, last_synced_at: datetime) -> None:
+        self.upsert_state(
+            tenant_id=tenant_id,
+            source_type=source_type,
+            external_ref=external_ref,
+            last_seen_modified_at=None,
+            last_seen_checksum=None,
+            last_synced_at=last_synced_at,
+            last_status="deleted",
+            last_error_code=None,
+            last_error_message=None,
+        )
+
     def mark_success(
         self,
         *,

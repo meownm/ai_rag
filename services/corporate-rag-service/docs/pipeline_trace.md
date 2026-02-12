@@ -44,3 +44,5 @@
 - Connectors list descriptors, then items are fetched descriptor-by-descriptor.
 - Incremental skipping uses `source_sync_state` before fetching payload bytes/body.
 - Structured summary log emitted with counters: `descriptors_listed`, `items_fetched`, `items_skipped_incremental`, `items_ingested`, `items_failed`.
+
+- Confluence conversion strategy: `docs/confluence_html_to_markdown_strategy.md`.
