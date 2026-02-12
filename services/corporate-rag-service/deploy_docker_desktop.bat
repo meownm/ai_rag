@@ -1,13 +1,21 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
+
+set "SERVICE_PORT=8100"
+if exist ".env" (
+  for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+    if /I "%%~A"=="RAG_SERVICE_PORT" set "SERVICE_PORT=%%~B"
+  )
+)
 
 docker build -t corporate-rag-service .
 if errorlevel 1 goto :error
 
-docker run -p 8100:8100 corporate-rag-service
+docker run -p !SERVICE_PORT!:!SERVICE_PORT! -e RAG_SERVICE_PORT=!SERVICE_PORT! corporate-rag-service
 if errorlevel 1 goto :error
 
 echo [OK] Deployment finished.
+echo [INFO] Swagger URL: http://localhost:!SERVICE_PORT!/docs
 exit /b 0
 
 :error

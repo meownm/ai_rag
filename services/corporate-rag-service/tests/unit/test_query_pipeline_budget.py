@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.query_pipeline import TRUNCATION_MARKER, apply_context_budget, estimate_tokens
 
 
@@ -29,3 +31,8 @@ def test_apply_context_budget_token_mode_truncates_top_chunk_negative():
     assert retained[0]["chunk_id"] == "1"
     assert TRUNCATION_MARKER in retained[0]["chunk_text"]
     assert log["truncated"] is True
+
+
+def test_apply_context_budget_rejects_word_based_fallback_negative():
+    with pytest.raises(ValueError, match="Word-based context trimming"):
+        apply_context_budget([], use_token_budget_assembly=False)

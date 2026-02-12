@@ -26,6 +26,15 @@ def test_deploy_script_has_pause_on_error_rule() -> None:
     assert "exit /b 1" in script
 
 
+def test_run_local_script_uses_env_port_and_prints_swagger_url() -> None:
+    script = _read_script("run_local.bat")
+
+    assert "title corporate rag service - local run" in script
+    assert "rag_service_port" in script
+    assert "swagger url" in script
+    assert "pause" in script
+
+
 def test_scripts_keep_success_exit_path() -> None:
     install_script = _read_script("install.bat")
     deploy_script = _read_script("deploy_docker_desktop.bat")

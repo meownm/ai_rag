@@ -9,7 +9,6 @@ for the future extension point.
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -176,8 +175,9 @@ def _canonical_chunk_text(text: str) -> str:
 
 
 def _token_count(text: str) -> int:
-    estimator = os.getenv("TOKEN_ESTIMATOR", "split")
-    return token_count(text, estimator=estimator)
+    from app.core.config import settings
+
+    return token_count(text, estimator=getattr(settings, "TOKEN_ESTIMATOR", "split"))
 
 
 def _is_table_separator_line(line: str) -> bool:
