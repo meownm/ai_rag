@@ -20,7 +20,7 @@ At startup the service now:
 
 - Paragraphs and tables are processed in native document order.
 - Heading levels are preserved in markdown (`#`, `##`, ...).
-- List paragraphs are emitted with markdown list markers.
+- List paragraphs are emitted with markdown list markers and preserve nested indentation via DOCX `numPr/ilvl` (including `numPr` fallback when style names are generic).
 - Tables remain in-place instead of being appended at document end.
 
 ### PDF
@@ -29,7 +29,13 @@ At startup the service now:
 - Page markers are always emitted (`<!-- page:N -->`).
 - Basic tables are converted to markdown tables when at least two rows are detected.
 
+## Ingestion Runtime Unification
+
+- `/v1/ingest/files/upload` now uses the same connector registry ingestion path as other source types (`ingest_sources_sync` + `SourceConnector`).
+- Byte uploads are no longer blocked by legacy `NotImplementedError`; upload ingestion passes through connector descriptors/fetch flow and stores raw payload artifacts.
+- Deprecated connector stubs were removed from runtime scope; default connector registration contains only real connectors.
+
 ## Windows Scripts
 
-- `run_local.bat` reads `RAG_SERVICE_PORT` from `.env`, sets window title, prints Swagger URL, and pauses on error.
+- `run_local.bat` reads `PORT` from `.env`, sets window title, prints Swagger URL before `uvicorn` startup, and pauses on error.
 - `deploy_docker_desktop.bat` reads `RAG_SERVICE_PORT` from `.env`, avoids hardcoded port assumptions, prints Swagger URL, and pauses on error.

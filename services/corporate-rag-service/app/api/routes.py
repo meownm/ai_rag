@@ -43,9 +43,11 @@ from app.services.agent_pipeline import (
 )
 from app.services.audit import log_event
 from app.services.file_ingestion import FileByteIngestor
-from app.services.ingestion import ingest_source_items
+from app.services.ingestion import ingest_sources_sync
 from app.services.performance import build_stage_budgets, exceeded_budgets
 from app.services.context_expansion import ContextExpansionEngine
+from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SyncContext
+from app.services.connectors.registry import ConnectorRegistry
 from app.services.query_pipeline import apply_context_budget, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
@@ -389,8 +391,37 @@ async def upload_file_for_ingestion(
     db: Session = Depends(get_db),
 ) -> JobAcceptedResponse:
     content = await file.read()
-    item = FileByteIngestor().ingest_bytes(filename=file.filename or "upload.bin", payload=content)
-    counters = ingest_source_items(db, tenant_id, [item], raw_payloads={item.external_ref: content})
+
+    class UploadConnector:
+        source_type = "FILE_UPLOAD_OBJECT"
+
+        def __init__(self, upload_name: str, upload_payload: bytes) -> None:
+            self._filename = upload_name or "upload.bin"
+            self._payload = upload_payload
+            self._item = FileByteIngestor().ingest_bytes(filename=self._filename, payload=upload_payload)
+
+        def is_configured(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def list_descriptors(self, tenant: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+            return [SourceDescriptor(source_type=self.source_type, external_ref=self._item.external_ref, title=self._item.title)]
+
+        def fetch_item(self, tenant: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
+            return ConnectorFetchResult(item=self._item, raw_payload=self._payload)
+
+    try:
+        upload_connector = UploadConnector(file.filename or "upload.bin", content)
+    except ValueError as exc:
+        raise _error("I-UPLOAD-INVALID-FILE", str(exc), uuid.uuid4(), False, status.HTTP_400_BAD_REQUEST) from exc
+
+    runtime_registry = ConnectorRegistry()
+    runtime_registry.register(upload_connector)
+    counters = ingest_sources_sync(
+        db,
+        tenant_id,
+        ["FILE_UPLOAD_OBJECT"],
+        connector_registry=runtime_registry,
+    )
     repo = TenantRepository(db, tenant_id)
     job = repo.create_job(job_type="REINDEX_ALL", requested_by="upload", payload={"source_types": ["FILE_UPLOAD_OBJECT"]})
     repo.mark_job(job, "done", result_payload=counters)
