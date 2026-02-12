@@ -45,6 +45,7 @@ class ConnectorError:
 class ConnectorFetchResult:
     item: SourceItem | None = None
     error: ConnectorError | None = None
+    raw_payload: bytes | None = None
 
 
 class SourceConnector(Protocol):

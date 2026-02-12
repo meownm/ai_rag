@@ -559,12 +559,58 @@ def test_insert_chunks_writes_metadata_columns_positive(monkeypatch):
     assert "block_end_idx" in params
 
 
-def test_stub_file_byte_ingestor_is_declared_but_not_runtime_enabled():
-    from app.services.ingestion import StubFileByteIngestor
+def test_file_upload_source_type_is_ingested_via_connector_registry(monkeypatch):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.ingestion import ingest_sources_sync
 
-    ingestor = StubFileByteIngestor()
-    with pytest.raises(NotImplementedError):
-        ingestor.ingest_bytes(uuid.uuid4(), "file:1", b"binary")
+    class UploadConnector:
+        source_type = "FILE_UPLOAD_OBJECT"
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="upload:1", title="upload.txt")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            item = SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title=descriptor.title, markdown="hello")
+            return ConnectorFetchResult(item=item, raw_payload=b"hello")
+
+    class FakeRegistry:
+        def __init__(self):
+            self.connector = UploadConnector()
+
+        def get(self, source_type):
+            assert source_type == "FILE_UPLOAD_OBJECT"
+            return self.connector
+
+    class FakeSettings:
+        CONNECTOR_REGISTRY_ENABLED = True
+        CONNECTOR_SYNC_MAX_ITEMS_PER_RUN = 5000
+        CONNECTOR_SYNC_PAGE_SIZE = 100
+        CONNECTOR_INCREMENTAL_ENABLED = True
+
+    captured = {}
+
+    def fake_ingest_source_items(db, tenant, items, storage=None, raw_payloads=None):
+        captured["items"] = items
+        captured["raw_payloads"] = raw_payloads
+        return {"documents": 1, "chunks": 1, "cross_links": 0, "artifacts": 1}
+
+    monkeypatch.setattr("app.services.ingestion.settings", FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.SourceSyncStateRepository", lambda db: type("R", (), {"get_state": lambda *a: None, "list_external_refs": lambda *a: [], "mark_deleted": lambda *a, **k: None, "mark_failure": lambda *a, **k: None, "mark_success": lambda *a, **k: None})())
+    monkeypatch.setattr("app.services.ingestion.ingest_source_items", fake_ingest_source_items)
+
+    result = ingest_sources_sync(
+        db=object(),
+        tenant_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        source_types=["FILE_UPLOAD_OBJECT"],
+        connector_registry=FakeRegistry(),
+    )
+
+    assert result["documents"] == 1
+    assert captured["items"][0].external_ref == "upload:1"
+    assert captured["raw_payloads"] == {"upload:1": b"hello"}
 
 
 def test_should_fetch_positive_and_negative():

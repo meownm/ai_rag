@@ -45,6 +45,59 @@ class FileByteIngestor:
             lines.append("| " + " | ".join(row) + " |")
         return lines
 
+    def _list_level(self, paragraph) -> int:
+        p_pr = getattr(paragraph._p, "pPr", None)
+        if p_pr is None or getattr(p_pr, "numPr", None) is None or getattr(p_pr.numPr, "ilvl", None) is None:
+            return 0
+        try:
+            return int(p_pr.numPr.ilvl.val)
+        except (TypeError, ValueError):
+            return 0
+
+    def _list_prefix(self, level: int) -> str:
+        return "  " * max(level, 0)
+
+    def _numfmt_for_level(self, paragraph, level: int) -> str | None:
+        p_pr = getattr(paragraph._p, "pPr", None)
+        if p_pr is None or getattr(p_pr, "numPr", None) is None or getattr(p_pr.numPr, "numId", None) is None:
+            return None
+
+        num_id = p_pr.numPr.numId.val
+        numbering_part = getattr(paragraph.part, "numbering_part", None)
+        if numbering_part is None:
+            return None
+
+        numbering_root = numbering_part.numbering_definitions._numbering
+        num_nodes = numbering_root.xpath(f'.//w:num[@w:numId="{num_id}"]')
+        if not num_nodes:
+            return None
+
+        abstract_num_id = num_nodes[0].xpath('./w:abstractNumId/@w:val')
+        if not abstract_num_id:
+            return None
+
+        lvl_nodes = numbering_root.xpath(
+            f'.//w:abstractNum[@w:abstractNumId="{abstract_num_id[0]}"]/w:lvl[@w:ilvl="{level}"]'
+        )
+        if not lvl_nodes:
+            return None
+
+        num_fmt = lvl_nodes[0].xpath('./w:numFmt/@w:val')
+        return num_fmt[0] if num_fmt else None
+
+    def _list_kind(self, paragraph, style: str, level: int) -> str | None:
+        if "list bullet" in style:
+            return "unordered"
+        if "list number" in style:
+            return "ordered"
+
+        num_fmt = self._numfmt_for_level(paragraph, level)
+        if num_fmt is None:
+            return None
+        if num_fmt in {"bullet", "none"}:
+            return "unordered"
+        return "ordered"
+
     def _paragraph_to_markdown(self, paragraph, numbered_index: int) -> tuple[str | None, int]:
         text = paragraph.text.strip()
         if not text:
@@ -55,12 +108,16 @@ class FileByteIngestor:
             level = "".join(ch for ch in style if ch.isdigit()) or "1"
             return f"{'#' * max(1, int(level))} {text}", numbered_index
 
-        if "list bullet" in style:
-            return f"- {text}", numbered_index
+        list_level = self._list_level(paragraph)
+        indentation = self._list_prefix(list_level)
 
-        if "list number" in style:
+        list_kind = self._list_kind(paragraph, style, list_level)
+        if list_kind == "unordered":
+            return f"{indentation}- {text}", numbered_index
+
+        if list_kind == "ordered":
             numbered_index += 1
-            return f"{numbered_index}. {text}", numbered_index
+            return f"{indentation}{numbered_index}. {text}", numbered_index
 
         return text, numbered_index
 

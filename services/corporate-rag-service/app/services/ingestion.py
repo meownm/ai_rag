@@ -1,10 +1,4 @@
-"""Ingestion pipeline for crawler-provided markdown sources.
-
-Current contract: runtime ingestion accepts markdown text produced by crawlers
-(e.g., Confluence/FileCatalog adapters). Byte upload conversion is intentionally
-not implemented; see ``FileByteIngestor`` protocol and ``StubFileByteIngestor``
-for the future extension point.
-"""
+"""Ingestion pipeline for connector-provided markdown sources."""
 
 import hashlib
 import json
@@ -66,24 +60,6 @@ from app.services.connectors.registry import ConnectorRegistryError
 class StorageAdapter(Protocol):
     def put_text(self, bucket: str, key: str, text: str) -> str:
         ...
-
-
-class FileByteIngestor(Protocol):
-    """Future extension point for byte-level file ingestion.
-
-    Runtime ingestion currently accepts markdown emitted by crawler adapters only.
-    This protocol and stub are intentionally not wired into runtime yet.
-    """
-
-    def ingest_bytes(self, tenant_id: uuid.UUID, source_ref: str, payload: bytes) -> SourceItem:
-        ...
-
-
-class StubFileByteIngestor:
-    """Stub implementation reserved for future file-byte conversion pipeline."""
-
-    def ingest_bytes(self, tenant_id: uuid.UUID, source_ref: str, payload: bytes) -> SourceItem:
-        raise NotImplementedError("Byte upload ingestion is not enabled; ingestion accepts markdown from crawlers.")
 
 
 class NoopConfluenceCrawler:
@@ -1049,6 +1025,7 @@ def ingest_sources_sync(
     confluence: Any | None = None,
     file_catalog: Any | None = None,
     storage: StorageAdapter | None = None,
+    connector_registry: Any | None = None,
 ) -> dict[str, int]:
     if (confluence is not None or file_catalog is not None) or not settings.CONNECTOR_REGISTRY_ENABLED:
         items: list[SourceItem] = []
@@ -1058,7 +1035,7 @@ def ingest_sources_sync(
             items.extend(file_catalog.crawl(tenant_id))
         return ingest_source_items(db, tenant_id, items, storage=storage)
 
-    connector_registry = register_default_connectors()
+    connector_registry = connector_registry or register_default_connectors()
     sync_context = SyncContext(
         max_items_per_run=settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN,
         page_size=settings.CONNECTOR_SYNC_PAGE_SIZE,
@@ -1067,6 +1044,7 @@ def ingest_sources_sync(
     repo = SourceSyncStateRepository(db)
     items: list[SourceItem] = []
     descriptor_by_ref: dict[str, SourceDescriptor] = {}
+    raw_payloads: dict[str, bytes] = {}
     seen_refs_by_source_type: dict[str, set[str]] = {}
     counters = {
         "descriptors_listed": 0,
@@ -1077,8 +1055,6 @@ def ingest_sources_sync(
     }
 
     for source_type in source_types:
-        if source_type == "FILE_UPLOAD_OBJECT":
-            continue
         connector = connector_registry.get(source_type)
         descriptors = connector.list_descriptors(str(tenant_id), sync_context)[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
         counters["descriptors_listed"] += len(descriptors)
@@ -1114,6 +1090,8 @@ def ingest_sources_sync(
             counters["items_fetched"] += 1
             descriptor_by_ref[descriptor.external_ref] = descriptor
             items.append(result.item)
+            if result.raw_payload is not None:
+                raw_payloads[result.item.external_ref] = result.raw_payload
 
     for source_type, seen_refs in seen_refs_by_source_type.items():
         previous_refs = set(repo.list_external_refs(str(tenant_id), source_type))
@@ -1126,7 +1104,7 @@ def ingest_sources_sync(
                 last_synced_at=datetime.now(timezone.utc),
             )
 
-    ingest_result = ingest_source_items(db, tenant_id, items, storage=storage)
+    ingest_result = ingest_source_items(db, tenant_id, items, storage=storage, raw_payloads=raw_payloads)
     counters["items_ingested"] = ingest_result["documents"]
 
     for item in items:
@@ -1142,4 +1120,3 @@ def ingest_sources_sync(
 
     LOGGER.info("connector_summary", extra={"event": "connector_summary", "tenant_id": str(tenant_id), **counters})
     return ingest_result
-

@@ -5,6 +5,12 @@ import pytest
 from app.services.file_ingestion import FileByteIngestor
 
 
+def _set_list_level(paragraph, level: int) -> None:
+    num_pr = paragraph._p.get_or_add_pPr().get_or_add_numPr()
+    ilvl = num_pr.get_or_add_ilvl()
+    ilvl.val = level
+
+
 def test_ingest_txt_file():
     item = FileByteIngestor().ingest_bytes(filename="a.txt", payload=b"hello world")
     assert item.source_type == "FILE_UPLOAD_OBJECT"
@@ -87,3 +93,84 @@ def test_ingest_pdf_requires_pdfplumber_negative(monkeypatch):
 def test_ingest_unsupported_extension_raises():
     with pytest.raises(ValueError):
         FileByteIngestor().ingest_bytes(filename="a.xlsx", payload=b"123")
+
+
+def test_ingest_docx_preserves_nested_bullet_lists():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    parent = doc.add_paragraph("Parent")
+    parent.style = "List Bullet"
+    _set_list_level(parent, 0)
+
+    child = doc.add_paragraph("Child")
+    child.style = "List Bullet"
+    _set_list_level(child, 1)
+
+    nested = doc.add_paragraph("Nested")
+    nested.style = "List Bullet"
+    _set_list_level(nested, 2)
+
+    doc.save(stream)
+
+    markdown = FileByteIngestor().ingest_bytes(filename="nested_bullet.docx", payload=stream.getvalue()).markdown
+    assert "- Parent" in markdown
+    assert "  - Child" in markdown
+    assert "    - Nested" in markdown
+
+
+def test_ingest_docx_preserves_nested_numbered_lists():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    root = doc.add_paragraph("Step 1")
+    root.style = "List Number"
+    _set_list_level(root, 0)
+
+    sub = doc.add_paragraph("Step 1.1")
+    sub.style = "List Number"
+    _set_list_level(sub, 1)
+
+    doc.save(stream)
+
+    markdown = FileByteIngestor().ingest_bytes(filename="nested_numbered.docx", payload=stream.getvalue()).markdown
+    assert "1. Step 1" in markdown
+    assert "  2. Step 1.1" in markdown
+
+
+def test_ingest_docx_preserves_mixed_nested_lists_structure():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    root = doc.add_paragraph("Root")
+    root.style = "List Number"
+    _set_list_level(root, 0)
+
+    child = doc.add_paragraph("Child bullet")
+    child.style = "List Bullet"
+    _set_list_level(child, 1)
+
+    doc.save(stream)
+
+    markdown = FileByteIngestor().ingest_bytes(filename="mixed_nested.docx", payload=stream.getvalue()).markdown
+    assert "1. Root" in markdown
+    assert "  - Child bullet" in markdown
+
+
+def test_ingest_docx_detects_numbering_from_numpr_when_style_is_plain():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    plain = doc.add_paragraph("Implicit numbered")
+    plain.style = "List Number"
+    _set_list_level(plain, 0)
+    plain.style = "Normal"
+
+    doc.save(stream)
+
+    markdown = FileByteIngestor().ingest_bytes(filename="numpr_plain.docx", payload=stream.getvalue()).markdown
+    assert "1. Implicit numbered" in markdown
