@@ -4,6 +4,7 @@ import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -66,12 +67,20 @@ def sanitize_user_query(query: str) -> PromptSecurityResult:
 
 
 class InMemoryRateLimiter:
-    def __init__(self, window_seconds: int, per_user_limit: int, burst_limit: int, max_users: int = 10000):
+    def __init__(
+        self,
+        window_seconds: int,
+        per_user_limit: int,
+        burst_limit: int,
+        max_users: int = 10000,
+        now_fn: Callable[[], float] | None = None,
+    ):
         self.window_seconds = max(1, int(window_seconds))
         self.per_user_limit = max(1, int(per_user_limit))
         self.burst_limit = max(1, int(burst_limit))
         self.max_users = max(1, int(max_users))
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._now_fn = now_fn or time.monotonic
 
     def _prune(self, events: deque[float], now: float) -> None:
         threshold = now - self.window_seconds
@@ -89,9 +98,19 @@ class InMemoryRateLimiter:
                 return False
         return True
 
+    def _cleanup_inactive_users(self, now: float) -> None:
+        if len(self._events) <= self.max_users:
+            return
+        idle_sorted = sorted(
+            self._events.items(),
+            key=lambda item: item[1][-1] if item[1] else float("-inf"),
+        )
+        for cleanup_key, _ in idle_sorted[: len(self._events) - self.max_users]:
+            self._events.pop(cleanup_key, None)
+
     def allow(self, user_id: str) -> bool:
         key = (user_id or "anonymous").strip() or "anonymous"
-        now = time.monotonic()
+        now = self._now_fn()
         events = self._events[key]
         self._prune(events, now)
 
@@ -102,10 +121,7 @@ class InMemoryRateLimiter:
             return False
 
         events.append(now)
-        if len(self._events) > self.max_users:
-            # best-effort bounded cleanup in insertion order across map keys
-            for cleanup_key in list(self._events.keys())[: len(self._events) - self.max_users]:
-                self._events.pop(cleanup_key, None)
+        self._cleanup_inactive_users(now)
         return True
 
     def reset(self) -> None:

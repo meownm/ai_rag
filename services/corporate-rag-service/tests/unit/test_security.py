@@ -41,3 +41,25 @@ def test_rate_limiter_enforces_burst_control():
     assert limiter.allow("alice") is True
     assert limiter.allow("alice") is False
     assert limiter.allow("bob") is True
+
+
+def test_rate_limiter_allows_after_window_expiry():
+    now = {"t": 100.0}
+    limiter = InMemoryRateLimiter(window_seconds=60, per_user_limit=1, burst_limit=10, now_fn=lambda: now["t"])
+    assert limiter.allow("alice") is True
+    assert limiter.allow("alice") is False
+    now["t"] = 161.0
+    assert limiter.allow("alice") is True
+
+
+def test_rate_limiter_drops_inactive_users_when_storage_exceeded():
+    now = {"t": 100.0}
+    limiter = InMemoryRateLimiter(window_seconds=60, per_user_limit=10, burst_limit=10, max_users=2, now_fn=lambda: now["t"])
+    assert limiter.allow("u1") is True
+    now["t"] = 101.0
+    assert limiter.allow("u2") is True
+    now["t"] = 102.0
+    assert limiter.allow("u3") is True
+
+    assert len(limiter._events) == 2
+    assert "u1" not in limiter._events

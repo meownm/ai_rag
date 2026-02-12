@@ -10,7 +10,7 @@ Implemented protections in `POST /v1/query` request flow:
 - Detection of malicious instructions in user query.
 - Stripping directives that attempt external tool execution (shell/browser/package install/file exfiltration hints).
 - Preventing system prompt override attempts by stripping lines that request override/reveal behavior.
-- Logging sanitized security events via `SECURITY_PROMPT_SANITIZED`.
+- Logging sanitized security events via `ERROR` log records with code `SECURITY_PROMPT_SANITIZED`.
 
 ## SEC-2 — Rate limiting
 
@@ -26,7 +26,7 @@ Behavior:
 
 ## SEC-3 — RBAC for debug
 
-Added debug-mode role gating:
+Added debug-mode role gating (trace logs emitted only when debug is explicitly enabled by admin):
 
 - Debug request is read from `X-Debug-Mode` (`true/1/yes/on`).
 - User role is read from `X-User-Role`.

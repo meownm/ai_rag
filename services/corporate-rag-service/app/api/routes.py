@@ -377,14 +377,17 @@ def post_query(
     prompt_security = sanitize_user_query(payload.query)
     safe_query = prompt_security.sanitized_query
 
-    log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", payload.model_dump())
+    safe_payload_log = payload.model_dump()
+    safe_payload_log["query"] = safe_query
+    log_event(db, str(payload.tenant_id), str(corr), "API_REQUEST", safe_payload_log)
     if prompt_security.malicious_instruction_detected:
         log_event(
             db,
             str(payload.tenant_id),
             str(corr),
-            "SECURITY_PROMPT_SANITIZED",
+            "ERROR",
             {
+                "code": "SECURITY_PROMPT_SANITIZED",
                 "malicious_instruction_detected": True,
                 "stripped_external_tool_directives": prompt_security.stripped_external_tool_directives,
                 "stripped_system_override_attempt": prompt_security.stripped_system_override_attempt,
@@ -558,12 +561,12 @@ def post_query(
                 if pipeline_result.fallback_reason == "clarification_depth_exceeded":
                     log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_depth, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
 
-                if settings.LOG_DATA_MODE.strip().lower() == "plain":
+                if debug_enabled:
                     log_event(
                         db,
                         str(payload.tenant_id),
                         str(corr),
-                        "AGENT_TRACE",
+                        "PIPELINE_STAGE",
                         {
                             "agent_trace": [
                                 {"stage": t.stage, "latency_ms": t.latency_ms, "output": t.output}
@@ -800,12 +803,12 @@ def post_query(
     emit_metric("coverage_ratio", float(coverage_ratio))
     emit_metric("clarification_rate", clarification_rate)
     emit_metric("fallback_rate", fallback_rate)
-    if settings.LOG_DATA_MODE.strip().lower() == "plain":
+    if debug_enabled:
         log_event(
             db,
             str(payload.tenant_id),
             str(corr),
-            "AGENT_TRACE",
+            "PIPELINE_STAGE",
             {
                 "agent_trace": [
                     {"stage": t.stage, "latency_ms": t.latency_ms, "output": t.output}
