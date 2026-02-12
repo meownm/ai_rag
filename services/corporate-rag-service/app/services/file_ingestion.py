@@ -4,7 +4,7 @@ import hashlib
 import io
 from pathlib import Path
 
-from app.services.ingestion import SourceItem
+from app.services.connectors.base import SourceItem
 
 
 class FileByteIngestor:
