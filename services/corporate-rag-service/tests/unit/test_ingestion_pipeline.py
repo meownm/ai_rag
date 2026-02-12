@@ -43,6 +43,7 @@ class FakeDb:
         self.documents_by_version = {}
         self.chunks_by_document = {}
         self.chunk_texts = {}
+        self.sync_state = {}
 
     def execute(self, statement, params=None):
         stmt = str(statement)
@@ -87,7 +88,33 @@ class FakeDb:
             self.chunk_texts[chunk_id] = payload.get("chunk_text", "")
             return FakeResult()
 
-        if "SELECT c.chunk_id, c.chunk_text" in stmt and "LEFT JOIN chunk_vectors" in stmt:
+
+        if "FROM source_sync_state" in stmt and "SELECT" in stmt:
+            if "external_ref" in stmt and payload.get("external_ref") is None:
+                rows = [
+                    {"external_ref": key[2]}
+                    for key, row in self.sync_state.items()
+                    if key[0] == payload.get("tenant_id") and key[1] == payload.get("source_type")
+                ]
+                return FakeResult(rows)
+            key = (payload.get("tenant_id"), payload.get("source_type"), payload.get("external_ref"))
+            row = self.sync_state.get(key)
+            return FakeResult([] if row is None else [row])
+        if "INSERT INTO source_sync_state" in stmt:
+            key = (payload.get("tenant_id"), payload.get("source_type"), payload.get("external_ref"))
+            self.sync_state[key] = {
+                "tenant_id": payload.get("tenant_id"),
+                "source_type": payload.get("source_type"),
+                "external_ref": payload.get("external_ref"),
+                "last_seen_modified_at": payload.get("last_seen_modified_at"),
+                "last_seen_checksum": payload.get("last_seen_checksum"),
+                "last_synced_at": payload.get("last_synced_at"),
+                "last_status": payload.get("last_status"),
+                "last_error_code": payload.get("last_error_code"),
+                "last_error_message": payload.get("last_error_message"),
+            }
+            return FakeResult()
+        if "SELECT c.chunk_id, c.chunk_path, c.chunk_text" in stmt and "LEFT JOIN chunk_vectors" in stmt:
             chunk_ids = payload.get("chunk_ids", [])
             return FakeResult([{"chunk_id": cid, "chunk_text": self.chunk_texts.get(cid, "chunk text")} for cid in chunk_ids])
         return FakeResult()
@@ -184,14 +211,11 @@ def test_ingest_sources_sync_inserts_docs_chunks_links_and_s3_positive(monkeypat
     assert "rag-markdown" in buckets
 
 
-def test_ingest_sources_sync_negative_unknown_source_type_no_data():
+def test_ingest_sources_sync_negative_unknown_source_type_raises_error():
     db = FakeDb()
-    storage = FakeStorage()
     tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
-    result = ingest_sources_sync(db, tenant, ["UNKNOWN"], storage=storage)
-    assert result == {"documents": 0, "chunks": 0, "cross_links": 0, "artifacts": 0}
-    assert db.calls == []
-    assert storage.put_calls == []
+    with pytest.raises(Exception):
+        ingest_sources_sync(db, tenant, ["UNKNOWN"])
 
 
 def test_ingest_sources_sync_repeated_run_is_idempotent_for_sources_versions_documents_and_chunks(monkeypatch):
@@ -541,3 +565,256 @@ def test_stub_file_byte_ingestor_is_declared_but_not_runtime_enabled():
     ingestor = StubFileByteIngestor()
     with pytest.raises(NotImplementedError):
         ingestor.ingest_bytes(uuid.uuid4(), "file:1", b"binary")
+
+
+def test_should_fetch_positive_and_negative():
+    from datetime import datetime, timezone
+
+    from app.services.connectors.base import SourceDescriptor
+    from app.services.ingestion import should_fetch
+
+    descriptor = SourceDescriptor(
+        source_type="FILE_CATALOG_OBJECT",
+        external_ref="fs:a.txt",
+        title="a.txt",
+        last_modified=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        checksum_hint="v2",
+    )
+
+    class State:
+        last_seen_modified_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        last_seen_checksum = "v1"
+
+    assert should_fetch(descriptor, None, True) is True
+    assert should_fetch(descriptor, State(), True) is True
+
+    class SameState:
+        last_seen_modified_at = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        last_seen_checksum = "v2"
+
+    assert should_fetch(descriptor, SameState(), True) is False
+    assert should_fetch(descriptor, SameState(), False) is True
+
+
+def test_incremental_state_prevents_duplicate_fetch(monkeypatch):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+
+    class FakeConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def __init__(self):
+            self.fetch_calls = 0
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            self.fetch_calls += 1
+            return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown="# A"))
+
+    class FakeRegistry:
+        def __init__(self, connector):
+            self.connector = connector
+
+        def get(self, source_type):
+            return self.connector
+
+    db = FakeDb()
+    connector = FakeConnector()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    monkeypatch.setattr("app.services.ingestion.register_default_connectors", lambda: FakeRegistry(connector))
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    storage = FakeStorage()
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+
+    assert connector.fetch_calls == 1
+
+
+def test_chm_sp4_heading_path_preserved_in_chunks_positive(monkeypatch):
+    from app.services.ingestion import chunk_markdown
+
+    class FakeSettings:
+        CHUNK_TARGET_TOKENS = 650
+        CHUNK_MAX_TOKENS = 900
+        CHUNK_MIN_TOKENS = 120
+        CHUNK_OVERLAP_TOKENS = 80
+
+    monkeypatch.setattr("app.services.ingestion._load_settings", lambda: FakeSettings())
+
+    chunks = chunk_markdown("# Main\n\n## Sub\n\nBody text")
+    assert chunks
+    assert any(chunk.get("chunk_path") and "Main" in chunk.get("chunk_path") for chunk in chunks)
+
+
+def test_chm_sp4_embedding_text_contains_heading_path_positive():
+    from app.services.ingestion import _build_embedding_text
+
+    text = _build_embedding_text("Main/Sub", "chunk body")
+    assert text.startswith("[H] Main/Sub")
+    assert "chunk body" in text
+
+
+def test_fcs_sp3_incremental_skip_emits_log(monkeypatch, caplog):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+
+    class FakeConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def __init__(self):
+            self.fetch_calls = 0
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            self.fetch_calls += 1
+            return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown="# A"))
+
+    class FakeRegistry:
+        def __init__(self, connector):
+            self.connector = connector
+
+        def get(self, source_type):
+            return self.connector
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    db = FakeDb()
+    connector = FakeConnector()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr("app.services.ingestion.register_default_connectors", lambda: FakeRegistry(connector))
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    storage = FakeStorage()
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+    with caplog.at_level("INFO"):
+        ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+
+    assert "file_catalog_skip_incremental" in caplog.text
+
+
+def test_fcs_sp5_updated_file_creates_new_version(monkeypatch):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+
+    class MutableConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def __init__(self):
+            self.rev = 1
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [
+                SourceDescriptor(
+                    source_type=self.source_type,
+                    external_ref="fs:a.md",
+                    title="A",
+                    checksum_hint=f"h{self.rev}",
+                )
+            ]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown=f"# A {self.rev}"))
+
+    class FakeRegistry:
+        def __init__(self, connector):
+            self.connector = connector
+
+        def get(self, source_type):
+            return self.connector
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    db = FakeDb()
+    storage = FakeStorage()
+    connector = MutableConnector()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr("app.services.ingestion.register_default_connectors", lambda: FakeRegistry(connector))
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    first = ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+    connector.rev = 2
+    second = ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+
+    assert first["documents"] == 1
+    assert second["documents"] == 1
+    source_version_calls = [sql for sql, _ in db.calls if "INSERT INTO source_versions" in sql]
+    assert len(source_version_calls) == 2
+
+
+def test_fcs_sp6_deleted_file_marked_in_sync_state(monkeypatch):
+    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+
+    class MutableConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def __init__(self):
+            self.include = True
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            if not self.include:
+                return []
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="h1")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown="# A"))
+
+    class FakeRegistry:
+        def __init__(self, connector):
+            self.connector = connector
+
+        def get(self, source_type):
+            return self.connector
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    db = FakeDb()
+    storage = FakeStorage()
+    connector = MutableConnector()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr("app.services.ingestion.register_default_connectors", lambda: FakeRegistry(connector))
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+    connector.include = False
+    ingest_sources_sync(db, tenant, ["FILE_CATALOG_OBJECT"], storage=storage)
+
+    state = db.sync_state[(str(tenant), "FILE_CATALOG_OBJECT", "fs:a.md")]
+    assert state["last_status"] == "deleted"
