@@ -36,3 +36,16 @@
 - Inline attachment references are emitted as markdown links (`attachment:<filename>`).
 
 - Backward-compatibility guard: when explicit legacy crawler instances are passed to `ingest_sources_sync`, ingestion uses that legacy path to avoid breaking existing call sites/tests while registry mode remains default for normal runtime dispatch.
+
+
+## Confluence attachments connector
+
+- Uses two-step retrieval for binary attachments:
+  1. `list_attachments` via `/rest/api/content/search` with `type=attachment` CQL.
+  2. `fetch_attachment_by_id` to resolve metadata and download link, then `download_attachment` to read bytes.
+- Bytes are normalized via `FileByteIngestor` (DOCX/PDF/MD/TXT) to preserve existing file-ingestion structure and markdown conversion behavior.
+- `external_ref` format: `attachment:{id}`.
+- If extension is missing, connector infers supported extension from Confluence `metadata.mediaType` (`text/markdown`, `text/plain`, DOCX, PDF).
+- Unsupported extensions/media types fail with deterministic connector error `C-ATTACHMENT-UNSUPPORTED-TYPE`.
+- Attachment metadata preserves Confluence container linkage (`containerId`, `containerType`) for diagnostics and traceability.
+- Missing download link returns `C-ATTACHMENT-MISSING-DOWNLOAD`; network/API failures return retryable `C-ATTACHMENT-FETCH-FAILED`.
