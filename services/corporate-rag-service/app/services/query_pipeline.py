@@ -83,6 +83,8 @@ def apply_context_budget(
     if not use_token_budget_assembly:
         raise ValueError("Word-based context trimming is no longer supported; enable token budget assembly")
 
+    effective_budget = max(0, int(max_context_tokens) - int(settings.TOKEN_BUDGET_SAFETY_MARGIN))
+
     if not chunks:
         return [], {
             "context_word_count_before": 0,
@@ -90,6 +92,7 @@ def apply_context_budget(
             "chunks_dropped_count": 0,
             "total_context_tokens_est": 0,
             "max_context_tokens": max_context_tokens,
+            "effective_context_tokens": effective_budget,
             "truncated": False,
             "initial_tokens": 0,
             "trimmed_tokens": 0,
@@ -104,7 +107,7 @@ def apply_context_budget(
     truncated = False
 
     # Deterministic low-score trimming first.
-    while assembled and sum(token_map[str(c.get("chunk_id"))] for c in assembled) > max_context_tokens:
+    while assembled and sum(token_map[str(c.get("chunk_id"))] for c in assembled) > effective_budget:
         removable = sorted(
             assembled,
             key=lambda c: (
@@ -117,12 +120,20 @@ def apply_context_budget(
 
     if not assembled:
         best = dict(sorted(chunks, key=lambda c: (-float(c.get("final_score", 0.0)), str(c.get("chunk_id"))))[0])
-        best["chunk_text"] = _truncate_text_to_tokens(str(best.get("chunk_text", "")), max_context_tokens)
+        best["chunk_text"] = _truncate_text_to_tokens(str(best.get("chunk_text", "")), effective_budget)
         best["context_truncated"] = True
         assembled = [best]
         truncated = True
 
     final_tokens = sum(estimate_tokens(str(c.get("chunk_text", ""))) for c in assembled)
+    if final_tokens > effective_budget and assembled:
+        tail = dict(assembled[-1])
+        keep = max(1, effective_budget - sum(estimate_tokens(str(c.get("chunk_text", ""))) for c in assembled[:-1]))
+        tail["chunk_text"] = _truncate_text_to_tokens(str(tail.get("chunk_text", "")), keep)
+        tail["context_truncated"] = True
+        assembled[-1] = tail
+        truncated = True
+        final_tokens = sum(estimate_tokens(str(c.get("chunk_text", ""))) for c in assembled)
     trimmed_tokens = max(0, initial_tokens - final_tokens)
 
     before_words = sum(token_count(c.get("chunk_text", "")) for c in chunks)
@@ -133,6 +144,7 @@ def apply_context_budget(
         "chunks_dropped_count": dropped,
         "total_context_tokens_est": final_tokens,
         "max_context_tokens": max_context_tokens,
+        "effective_context_tokens": effective_budget,
         "truncated": truncated,
         "initial_tokens": initial_tokens,
         "trimmed_tokens": trimmed_tokens,

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from pathlib import Path
 
+from app.core.config import settings
 from app.services.connectors.base import SourceItem
 
 
@@ -55,7 +57,8 @@ class FileByteIngestor:
             return 0
 
     def _list_prefix(self, level: int) -> str:
-        return "  " * max(level, 0)
+        indent = " " * max(0, int(settings.DOCX_LIST_INDENT_SPACES))
+        return indent * max(level, 0)
 
     def _numfmt_for_level(self, paragraph, level: int) -> str | None:
         p_pr = getattr(paragraph._p, "pPr", None)
@@ -139,7 +142,7 @@ class FileByteIngestor:
         from docx.text.paragraph import Paragraph
 
         document = docx.Document(io.BytesIO(payload))
-        lines: list[str] = []
+        blocks: list[tuple[str, str]] = []
         numbered_map: dict[tuple[str, int], int] = {}
 
         parent = document.element.body
@@ -148,13 +151,24 @@ class FileByteIngestor:
                 paragraph = Paragraph(child, document)
                 rendered, numbered_map = self._paragraph_to_markdown(paragraph, numbered_map)
                 if rendered:
-                    lines.append(rendered)
+                    stripped = rendered.lstrip()
+                    is_list = bool(re.match(r"^([-*+]\s+|\d+\.\s+)", stripped))
+                    block_type = "list" if is_list else "text"
+                    blocks.append((block_type, rendered))
                 continue
             if child.tag.endswith("}tbl"):
                 table = Table(child, document)
-                lines.extend(self._render_docx_table(table))
+                for row in self._render_docx_table(table):
+                    blocks.append(("table", row))
 
-        return "\n\n".join(lines)
+        out: list[str] = []
+        prev_type: str | None = None
+        for block_type, content in blocks:
+            if out:
+                out.append("\n" if block_type == "list" and prev_type == "list" else "\n\n")
+            out.append(content)
+            prev_type = block_type
+        return "".join(out)
 
     def _render_pdf_table(self, table: list[list[str | None]]) -> list[str]:
         rows = [[(cell or "").strip().replace("\n", " ") for cell in row] for row in table if row and any(cell for cell in row)]

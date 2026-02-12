@@ -23,19 +23,19 @@ def test_trim_history_turns_enforces_turn_and_token_limits(monkeypatch):
 
 
 def test_has_invalid_citations_rejects_hallucinated_chunk_id():
-    allowed = {"c1", "c2"}
-    citations = [{"chunk_id": "c1"}, {"chunk_id": "missing"}]
+    allowed = {("c1", "d1"), ("c2", "d2")}
+    citations = [{"chunk_id": "c1", "document_id": "d1"}, {"chunk_id": "missing", "document_id": "d9"}]
     assert _has_invalid_citations(citations, allowed) is True
 
 
 def test_has_invalid_citations_accepts_retrieved_chunk_ids_only():
-    allowed = {"c1", "c2"}
-    citations = [{"chunk_id": "c1"}, {"chunk_id": "c2"}]
+    allowed = {("c1", "d1"), ("c2", "d2")}
+    citations = [{"chunk_id": "c1", "document_id": "d1"}, {"chunk_id": "c2", "document_id": "d2"}]
     assert _has_invalid_citations(citations, allowed) is False
 
 
 def test_has_invalid_citations_rejects_non_list_negative():
-    assert _has_invalid_citations({"chunk_id": "c1"}, {"c1"}) is True
+    assert _has_invalid_citations({"chunk_id": "c1"}, {("c1", "d1")}) is True
 
 def test_should_reset_topic_positive():
     reset, similarity = _should_reset_topic([1.0, 0.0], [0.0, 1.0], 0.35)
@@ -47,3 +47,8 @@ def test_should_reset_topic_negative():
     reset, similarity = _should_reset_topic([1.0, 0.0], [0.9, 0.1], 0.35)
     assert reset is False
     assert similarity > 0.35
+
+def test_has_invalid_citations_rejects_missing_document_id_negative():
+    allowed = {("c1", "d1")}
+    citations = [{"chunk_id": "c1"}]
+    assert _has_invalid_citations(citations, allowed) is True

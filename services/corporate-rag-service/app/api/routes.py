@@ -136,7 +136,7 @@ def _build_llm_prompt(query: str, contexts: list[dict]) -> str:
         "You are a grounded enterprise RAG assistant. Use only provided chunks. "
         "Every key claim must include citation chunk_ids from provided chunks. "
         "Return STRICT JSON only:\n"
-        '{"status":"success","answer":"...","citations":[{"chunk_id":"...","quote":"..."}]}'
+        '{"status":"success","answer":"...","citations":[{"chunk_id":"...","document_id":"...","quote":"..."}]}'
         "\nIf evidence is insufficient return:\n"
         '{"status":"insufficient_evidence","message":"..."}'
         f"\nQuestion: {query}\n\nContext:\n{blocks}"
@@ -176,13 +176,14 @@ def _trim_history_turns(turns: list[dict]) -> list[dict]:
 
 
 
-def _has_invalid_citations(citations_from_model: object, allowed_chunk_ids: set[str]) -> bool:
+def _has_invalid_citations(citations_from_model: object, allowed_pairs: set[tuple[str, str]]) -> bool:
     if not isinstance(citations_from_model, list):
         return True
     for citation in citations_from_model:
         if not isinstance(citation, dict):
             return True
-        if str(citation.get("chunk_id")) not in allowed_chunk_ids:
+        pair = (str(citation.get("chunk_id")), str(citation.get("document_id")))
+        if pair not in allowed_pairs:
             return True
     return False
 
@@ -208,8 +209,8 @@ def _is_debug_allowed(debug_requested: bool, user_role: str | None) -> bool:
 
 def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int]:
     repo = TenantRepository(db, tenant_id)
-    k_lex = max(top_n, settings.DEFAULT_TOP_K)
-    k_vec = max(top_n, settings.RERANKER_TOP_K)
+    k_lex = max(top_n, settings.DEFAULT_TOP_K, settings.HYBRID_MAX_FTS)
+    k_vec = max(top_n, settings.RERANKER_TOP_K, settings.HYBRID_MAX_VECTOR)
 
     t0 = time.perf_counter()
     lexical_scores = repo.fetch_lexical_candidate_scores(query, k_lex)
@@ -592,12 +593,13 @@ def post_query(
                 try:
                     current_emb = get_embeddings_client().embed_text(safe_query, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
                     previous_emb = get_embeddings_client().embed_text(last_user_turn_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
-                    should_reset_topic, topic_similarity = _should_reset_topic(current_emb, previous_emb, settings.TOPIC_RESET_SIMILARITY_THRESHOLD)
+                    should_reset_topic, topic_similarity = _should_reset_topic(current_emb, previous_emb, settings.TOPIC_RESET_SIM_THRESHOLD)
+                    should_reset_topic = bool(settings.TOPIC_RESET_ENABLED) and should_reset_topic
                 except Exception:
                     topic_similarity = 1.0
             if last_user_turn_text.strip() and should_reset_topic:
                 recent_turns = []
-                log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIMILARITY_THRESHOLD})
+                log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIM_THRESHOLD})
             latest_summary = conversation_repo.get_latest_summary(conversation_id)
             summary_text = latest_summary.summary_text if latest_summary else None
         try:
@@ -893,8 +895,8 @@ def post_query(
 
         parsed = _extract_json_payload(llm_raw)
         citations_from_model = parsed.get("citations") if isinstance(parsed, dict) else None
-        allowed_chunk_ids = {str(c.get("chunk_id")) for c in chosen}
-        has_invalid_citation = _has_invalid_citations(citations_from_model, allowed_chunk_ids)
+        allowed_pairs = {(str(c.get("chunk_id")), str(c.get("document_id"))) for c in chosen}
+        has_invalid_citation = _has_invalid_citations(citations_from_model, allowed_pairs)
 
         if parsed.get("status") != "success" or has_invalid_citation:
             answer = build_structured_refusal(str(corr), {"reason": "insufficient_evidence", "raw": llm_raw})

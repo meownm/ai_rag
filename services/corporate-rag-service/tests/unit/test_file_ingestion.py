@@ -2,6 +2,8 @@ import io
 
 import pytest
 
+pytest.importorskip("pydantic")
+
 from app.services.file_ingestion import FileByteIngestor
 
 
@@ -240,3 +242,19 @@ def test_ingest_docx_detects_numbering_from_numpr_when_style_is_plain():
 
     markdown = FileByteIngestor().ingest_bytes(filename="numpr_plain.docx", payload=stream.getvalue()).markdown
     assert "1. Implicit numbered" in markdown
+
+def test_ingest_docx_keeps_consecutive_list_items_in_single_block():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    one = doc.add_paragraph("One")
+    one.style = "List Bullet"
+    _set_list_level(one, 0)
+    two = doc.add_paragraph("Two")
+    two.style = "List Bullet"
+    _set_list_level(two, 0)
+
+    doc.save(stream)
+    markdown = FileByteIngestor().ingest_bytes(filename="list_block.docx", payload=stream.getvalue()).markdown
+    assert "- One\n- Two" in markdown
