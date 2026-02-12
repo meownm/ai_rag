@@ -473,6 +473,18 @@ def post_query(
                     trace={"trace_id": corr, "scoring_trace": []},
                 )
 
+            elif should_ask and clarification_streak >= settings.MAX_CLARIFICATION_DEPTH:
+                fallback_message = "Похоже, недостаточно информации для ответа... Попробуйте уточнить вопрос и сузить область поиска."
+                log_event(db, str(payload.tenant_id), str(corr), "ERROR", {"code": "RH-CLARIFICATION-DEPTH-EXCEEDED", "clarification_depth": clarification_streak, "max_clarification_depth": settings.MAX_CLARIFICATION_DEPTH})
+                conversation_repo.create_turn(conversation_id, "assistant", fallback_message, meta={"correlation_id": str(corr), "clarification_limit_exceeded": True})
+                return QueryResponse(
+                    answer=fallback_message,
+                    only_sources_verdict="FAIL",
+                    citations=[],
+                    correlation_id=corr,
+                    trace={"trace_id": corr, "scoring_trace": []},
+                )
+
     try:
         log_event(db, str(payload.tenant_id), str(corr), "EMBEDDINGS_REQUEST", {"query": resolved_query_text, "model": settings.EMBEDDINGS_DEFAULT_MODEL_ID})
         query_embedding = get_embeddings_client().embed_text(resolved_query_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
