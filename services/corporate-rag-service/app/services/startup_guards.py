@@ -1,54 +1,47 @@
 from __future__ import annotations
 
-import logging
-
 from app.clients.ollama_client import OllamaClient
 from app.core.config import settings
-
-logger = logging.getLogger(__name__)
+from app.core.logging import log_event
 
 
 class StartupValidationError(RuntimeError):
-    def __init__(self, error_code: str, message: str):
+    def __init__(self, error_code: str, message: str) -> None:
         super().__init__(message)
         self.error_code = error_code
 
 
-def validate_model_context_windows(client: OllamaClient | None = None) -> None:
+def validate_model_context_windows() -> None:
     if not settings.VERIFY_MODEL_NUM_CTX:
-        logger.info("startup_context_verification_skipped", extra={"verify_model_num_ctx": False})
+        log_event("startup.context.verification.skipped", payload={"verify_model_num_ctx": False}, plane="control")
         return
 
-    ollama_client = client or OllamaClient(settings.LLM_ENDPOINT, settings.LLM_MODEL, settings.REQUEST_TIMEOUT_SECONDS)
+    model_id = settings.LLM_MODEL
+    configured_window = int(settings.LLM_NUM_CTX)
+    provider = OllamaClient(settings.LLM_ENDPOINT, model_id, settings.REQUEST_TIMEOUT_SECONDS)
 
-    if settings.MODEL_CONTEXT_WINDOW <= 0:
-        raise StartupValidationError("MODEL_CONTEXT_MISMATCH", "MODEL_CONTEXT_WINDOW must be positive")
-
-    actual_num_ctx = ollama_client.fetch_model_num_ctx(settings.LLM_MODEL)
-    logger.info(
-        "startup_model_context_window_check",
-        extra={
-            "model_id": settings.LLM_MODEL,
-            "actual_num_ctx": actual_num_ctx,
-            "configured_model_context_window": settings.MODEL_CONTEXT_WINDOW,
-        },
+    log_event(
+        "startup.context.verification.started",
+        payload={"model_id": model_id, "configured_num_ctx": configured_window},
+        plane="control",
     )
-    if actual_num_ctx is None:
-        logger.warning("provider_num_ctx_unavailable", extra={"model_id": settings.LLM_MODEL})
-    elif settings.MODEL_CONTEXT_WINDOW > actual_num_ctx:
+
+    provider_window = provider.fetch_model_num_ctx(model_id)
+    if provider_window is None:
+        log_event("startup.provider.num_ctx.unavailable", payload={"model_id": settings.LLM_MODEL}, plane="control")
+        return
+
+    provider_int = int(provider_window)
+    if provider_int <= 0:
+        raise StartupValidationError("CFG-LIMIT-INVALID", f"Provider returned non-positive context limit: {provider_int}")
+
+    if provider_int < configured_window:
         raise StartupValidationError(
-            "MODEL_CONTEXT_MISMATCH",
-            f"MODEL_CONTEXT_WINDOW={settings.MODEL_CONTEXT_WINDOW} exceeds model num_ctx={actual_num_ctx}",
+            "CFG-LIMIT-OVERFLOW",
+            f"Configured num_ctx={configured_window} exceeds provider limit={provider_int} for model={model_id}",
         )
 
-    # SP7: provider compatibility check for each configured generation model.
-    for model_id in {settings.LLM_MODEL, settings.REWRITE_MODEL_ID}:
-        provider_limit = ollama_client.fetch_model_num_ctx(model_id)
-        if provider_limit is None:
-            logger.warning("provider_context_limit_unknown", extra={"model_id": model_id})
-            continue
-        if settings.MODEL_CONTEXT_WINDOW > provider_limit:
-            raise StartupValidationError(
-                "MODEL_CONTEXT_MISMATCH",
-                f"MODEL_CONTEXT_WINDOW={settings.MODEL_CONTEXT_WINDOW} exceeds provider_limit={provider_limit} for model {model_id}",
-            )
+    if provider_int != configured_window:
+        if provider_int > configured_window:
+            log_event("startup.provider.context.limit.unknown", payload={"model_id": model_id}, plane="control")
+    return None
