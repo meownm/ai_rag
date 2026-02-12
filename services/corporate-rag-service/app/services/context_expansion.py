@@ -101,6 +101,7 @@ class ContextExpansionEngine:
             key=lambda item: (-item[1][0].get("final_score", 0.0), str(item[0])),
         )
         chosen_docs = docs_ranked[: max(1, settings.CONTEXT_EXPANSION_MAX_DOCS)]
+        chosen_doc_ids = [str(doc_id) for doc_id, _ in chosen_docs]
         for doc_id, items in chosen_docs:
             anchors = sorted(items, key=lambda c: (-float(c.get("final_score", 0.0)), int(c.get("ordinal", 0)), str(c.get("chunk_id"))))[:1]
             for anchor in anchors:
@@ -121,8 +122,9 @@ class ContextExpansionEngine:
                     neighbors_added += 1
 
         if mode == "doc_neighbor_plus_links" and extra_added < settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
-            source_docs = [str(doc_id) for doc_id, _ in chosen_docs]
-            linked_docs = self.repo.fetch_outgoing_linked_documents(source_docs, settings.CONTEXT_EXPANSION_MAX_LINK_DOCS)
+            should_expand_links = self._should_expand_links(base, chosen_docs)
+            steps.append(f"links_enabled:{int(should_expand_links)}")
+            linked_docs = self.repo.fetch_outgoing_linked_documents(chosen_doc_ids, settings.CONTEXT_EXPANSION_MAX_LINK_DOCS) if should_expand_links else []
             for linked_doc in linked_docs:
                 if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
                     break
@@ -143,7 +145,7 @@ class ContextExpansionEngine:
         steps.append(f"deduped:{len(deduped)}")
         steps.append(f"redundancy_filtered:{redundancy_filtered}")
 
-        selected, debug = self._budget_select(filtered, token_budget, steps=steps)
+        selected, debug = self._budget_select(filtered, token_budget, steps=steps, doc_rank=chosen_doc_ids)
         info = ExpansionDebugInfo(
             base_topk_count=len(base),
             base_candidates_doc_diversity=len(doc_ids),
@@ -199,7 +201,14 @@ class ContextExpansionEngine:
             kept.append(c)
         return kept, filtered
 
-    def _budget_select(self, candidates: list[dict], token_budget: int, *, steps: list[str]) -> tuple[list[dict], ExpansionDebugInfo]:
+    def _budget_select(
+        self,
+        candidates: list[dict],
+        token_budget: int,
+        *,
+        steps: list[str],
+        doc_rank: list[str] | None = None,
+    ) -> tuple[list[dict], ExpansionDebugInfo]:
         selected: list[dict] = []
         used_tokens = 0
         min_gain = float(settings.CONTEXT_EXPANSION_MIN_GAIN)
@@ -224,7 +233,16 @@ class ContextExpansionEngine:
             selected.append(candidate)
             used_tokens += chunk_tokens
 
-        ordered = sorted(selected, key=lambda x: (str(x.get("document_id")), int(x.get("ordinal", 0)), str(x.get("chunk_id"))))
+        doc_rank_index = {doc_id: idx for idx, doc_id in enumerate(doc_rank or [])}
+        ordered = sorted(
+            selected,
+            key=lambda x: (
+                doc_rank_index.get(str(x.get("document_id")), len(doc_rank_index) + 1),
+                str(x.get("document_id")),
+                int(x.get("ordinal", 0)),
+                str(x.get("chunk_id")),
+            ),
+        )
         debug = ExpansionDebugInfo(
             base_topk_count=0,
             base_candidates_doc_diversity=0,
@@ -243,3 +261,11 @@ class ContextExpansionEngine:
         emb = list(candidate.get("embedding", []))
         sim = max((self._cosine(emb, list(s.get("embedding", []))) for s in selected), default=0.0)
         return max(0.0, sim - float(settings.CONTEXT_EXPANSION_REDUNDANCY_SIM_THRESHOLD))
+
+    @staticmethod
+    def _should_expand_links(base_candidates: list[dict], chosen_docs: list[tuple[str, list[dict]]]) -> bool:
+        if not chosen_docs:
+            return False
+        diversity = len({str(c.get("document_id")) for c in base_candidates if c.get("document_id") is not None})
+        depth = sum(len(chunks) for _, chunks in chosen_docs) / len(chosen_docs)
+        return depth < 1.5 or diversity > len(chosen_docs)
