@@ -2,10 +2,9 @@ from app.services.connectors.registry import ConnectorRegistry, ConnectorRegistr
 
 
 def register_default_connectors() -> ConnectorRegistry:
-    from app.services.connectors.confluence import ConfluencePagesConnector
+    from app.services.connectors.confluence import ConfluenceAttachmentConnector, ConfluencePagesConnector
     from app.services.connectors.file_catalog import FileCatalogConnector
     from app.services.connectors.s3_catalog import S3CatalogConnector
-    from app.services.connectors.stubs import ConfluenceAttachmentConnector
 
     registry.register(ConfluencePagesConnector())
     registry.register(ConfluenceAttachmentConnector())

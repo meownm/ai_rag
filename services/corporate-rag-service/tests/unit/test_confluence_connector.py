@@ -127,6 +127,185 @@ def test_confluence_pages_connector_two_step_pagination_positive(monkeypatch):
     assert len(fake_client.fetch_calls) == 1
 
 
+class FakeConfluenceAttachmentClient(FakeConfluenceClient):
+    def __init__(self):
+        super().__init__()
+        self.download_calls: list[str] = []
+
+    def list_attachments(self, *, cql: str, start: int, limit: int):
+        self.list_calls.append({"cql": cql, "start": start, "limit": limit})
+        if start == 0:
+            return [
+                {
+                    "id": "att-1",
+                    "title": "policy.md",
+                    "container": {"id": "101", "type": "page"},
+                    "version": {"number": 5, "when": "2024-01-02T10:20:30Z"},
+                    "metadata": {"mediaType": "text/markdown"},
+                }
+            ]
+        return []
+
+    def fetch_attachment_by_id(self, attachment_id: str):
+        self.fetch_calls.append({"attachment_id": attachment_id})
+        return {
+            "id": attachment_id,
+            "title": "policy.md",
+            "container": {"id": "101", "type": "page"},
+            "metadata": {"mediaType": "text/markdown"},
+            "_links": {"base": "https://conf.local", "webui": "/download/attachments/101/policy.md", "download": "/download/attachments/101/policy.md"},
+        }
+
+    def download_attachment(self, download_url: str) -> bytes:
+        self.download_calls.append(download_url)
+        return b"# Policy\n\nAll hands"
+
+
+def test_confluence_attachment_connector_positive(monkeypatch):
+    from app.services.connectors import confluence as module
+
+    fake_settings = module._load_settings()
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_CQL", "")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_SPACE_KEYS", "ENG")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_BASE_URL", "https://conf.local")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_PAT", "token")
+    monkeypatch.setattr(module, "_load_settings", lambda: fake_settings)
+
+    client = FakeConfluenceAttachmentClient()
+    connector = module.ConfluenceAttachmentConnector(client=client)
+
+    descriptors = connector.list_descriptors(
+        tenant_id="t1",
+        sync_context=SyncContext(max_items_per_run=10, page_size=1, incremental_enabled=True),
+    )
+
+    assert len(descriptors) == 1
+    assert descriptors[0].external_ref == "attachment:att-1"
+
+    result = connector.fetch_item("t1", descriptors[0])
+    assert result.error is None
+    assert result.item is not None
+    assert result.item.source_type == "CONFLUENCE_ATTACHMENT"
+    assert "# Policy" in result.item.markdown
+    assert result.item.metadata["containerId"] == "101"
+    assert len(client.download_calls) == 1
+
+
+def test_confluence_attachment_connector_negative_unsupported_extension(monkeypatch):
+    from app.services.connectors import confluence as module
+
+    class UnsupportedAttachmentClient(FakeConfluenceAttachmentClient):
+        def fetch_attachment_by_id(self, attachment_id: str):
+            payload = super().fetch_attachment_by_id(attachment_id)
+            payload["title"] = "archive.zip"
+            payload["metadata"] = {"mediaType": "application/octet-stream"}
+            return payload
+
+    fake_settings = module._load_settings()
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_BASE_URL", "https://conf.local")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_PAT", "token")
+    monkeypatch.setattr(module, "_load_settings", lambda: fake_settings)
+
+    connector = module.ConfluenceAttachmentConnector(client=UnsupportedAttachmentClient())
+    descriptor = module.SourceDescriptor(
+        source_type="CONFLUENCE_ATTACHMENT",
+        external_ref="attachment:att-1",
+        title="archive.zip",
+        metadata={"attachment_id": "att-1"},
+    )
+
+    result = connector.fetch_item("t1", descriptor)
+    assert result.item is None
+    assert result.error is not None
+    assert result.error.error_code == "C-ATTACHMENT-UNSUPPORTED-TYPE"
+
+
+
+def test_confluence_attachment_connector_negative_missing_download(monkeypatch):
+    from app.services.connectors import confluence as module
+
+    class NoDownloadClient(FakeConfluenceAttachmentClient):
+        def fetch_attachment_by_id(self, attachment_id: str):
+            payload = super().fetch_attachment_by_id(attachment_id)
+            payload["_links"].pop("download", None)
+            return payload
+
+    fake_settings = module._load_settings()
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_BASE_URL", "https://conf.local")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_PAT", "token")
+    monkeypatch.setattr(module, "_load_settings", lambda: fake_settings)
+
+    connector = module.ConfluenceAttachmentConnector(client=NoDownloadClient())
+    descriptor = module.SourceDescriptor(
+        source_type="CONFLUENCE_ATTACHMENT",
+        external_ref="attachment:att-1",
+        title="policy.md",
+        metadata={"attachment_id": "att-1"},
+    )
+
+    result = connector.fetch_item("t1", descriptor)
+    assert result.item is None
+    assert result.error is not None
+    assert result.error.error_code == "C-ATTACHMENT-MISSING-DOWNLOAD"
+
+
+def test_confluence_attachment_connector_positive_media_type_fallback(monkeypatch):
+    from app.services.connectors import confluence as module
+
+    class NoExtensionClient(FakeConfluenceAttachmentClient):
+        def fetch_attachment_by_id(self, attachment_id: str):
+            payload = super().fetch_attachment_by_id(attachment_id)
+            payload["title"] = "policy"
+            payload["metadata"] = {"mediaType": "text/markdown"}
+            return payload
+
+    fake_settings = module._load_settings()
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_BASE_URL", "https://conf.local")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_PAT", "token")
+    monkeypatch.setattr(module, "_load_settings", lambda: fake_settings)
+
+    connector = module.ConfluenceAttachmentConnector(client=NoExtensionClient())
+    descriptor = module.SourceDescriptor(
+        source_type="CONFLUENCE_ATTACHMENT",
+        external_ref="attachment:att-1",
+        title="policy",
+        metadata={"attachment_id": "att-1"},
+    )
+
+    result = connector.fetch_item("t1", descriptor)
+    assert result.error is None
+    assert result.item is not None
+    assert result.item.title.endswith(".md")
+
+
+def test_confluence_attachment_connector_negative_fetch_failed(monkeypatch):
+    import httpx
+    from app.services.connectors import confluence as module
+
+    class BrokenClient(FakeConfluenceAttachmentClient):
+        def fetch_attachment_by_id(self, attachment_id: str):
+            raise httpx.HTTPError("boom")
+
+    fake_settings = module._load_settings()
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_BASE_URL", "https://conf.local")
+    monkeypatch.setattr(fake_settings, "CONFLUENCE_PAT", "token")
+    monkeypatch.setattr(module, "_load_settings", lambda: fake_settings)
+
+    connector = module.ConfluenceAttachmentConnector(client=BrokenClient())
+    descriptor = module.SourceDescriptor(
+        source_type="CONFLUENCE_ATTACHMENT",
+        external_ref="attachment:att-1",
+        title="policy.md",
+        metadata={"attachment_id": "att-1"},
+    )
+
+    result = connector.fetch_item("t1", descriptor)
+    assert result.item is None
+    assert result.error is not None
+    assert result.error.error_code == "C-ATTACHMENT-FETCH-FAILED"
+    assert result.error.retryable is True
+
+
 def test_confluence_pages_connector_negative_empty_body(monkeypatch):
     class EmptyBodyClient(FakeConfluenceClient):
         def fetch_page_body_by_id(self, page_id: str, *, representation: str):

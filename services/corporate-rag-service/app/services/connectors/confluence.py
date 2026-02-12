@@ -5,6 +5,7 @@ import html
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -12,6 +13,7 @@ from xml.etree import ElementTree as ET
 import httpx
 
 from app.services.connectors.base import ConnectorError, ConnectorFetchResult, SourceConnector, SourceDescriptor, SourceItem, SyncContext
+from app.services.file_ingestion import FileByteIngestor
 
 AC_NS = "http://atlassian.com/content"
 RI_NS = "http://atlassian.com/resource/identifier"
@@ -134,6 +136,18 @@ def _extract_attachment_filename(node: ET.Element | None) -> str:
         return "attachment"
     filename = node.attrib.get(f"{{{RI_NS}}}filename") or node.attrib.get("ri:filename")
     return filename or "attachment"
+
+
+def _extension_from_media_type(media_type: str | None) -> str:
+    mapping = {
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "application/pdf": ".pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    }
+    if not media_type:
+        return ""
+    return mapping.get(media_type.lower().strip(), "")
 
 
 def _render_inline(node: ET.Element | None) -> str:
@@ -360,6 +374,31 @@ class ConfluenceClient:
             response.raise_for_status()
             return response.json()
 
+    def list_attachments(self, *, cql: str, start: int, limit: int) -> list[dict[str, Any]]:
+        url = f"{self.base_url.rstrip('/')}/rest/api/content/search"
+        with httpx.Client(timeout=self.timeout_seconds, headers=self._auth_headers()) as client:
+            response = client.get(url, params={"cql": cql, "start": start, "limit": limit})
+            response.raise_for_status()
+            payload = response.json()
+        return payload.get("results", [])
+
+    def fetch_attachment_by_id(self, attachment_id: str) -> dict[str, Any]:
+        url = f"{self.base_url.rstrip('/')}/rest/api/content/{attachment_id}"
+        with httpx.Client(timeout=self.timeout_seconds, headers=self._auth_headers()) as client:
+            response = client.get(url, params={"expand": "version,container,_links,metadata"})
+            response.raise_for_status()
+            return response.json()
+
+    def download_attachment(self, download_url: str) -> bytes:
+        if download_url.startswith("http://") or download_url.startswith("https://"):
+            url = download_url
+        else:
+            url = f"{self.base_url.rstrip('/')}/{download_url.lstrip('/')}"
+        with httpx.Client(timeout=self.timeout_seconds, headers=self._auth_headers()) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.content
+
 
 class ConfluencePagesConnector(SourceConnector):
     source_type = "CONFLUENCE_PAGE"
@@ -461,6 +500,127 @@ class ConfluencePagesConnector(SourceConnector):
                     "webui": webui,
                     "version": version.get("number"),
                     "lastModified": last_modified.isoformat() if last_modified else None,
+                },
+            )
+        )
+
+
+class ConfluenceAttachmentConnector(SourceConnector):
+    source_type = "CONFLUENCE_ATTACHMENT"
+
+    def __init__(self, client: ConfluenceClient | None = None, file_ingestor: FileByteIngestor | None = None) -> None:
+        cfg = _load_settings()
+        self.client = client or ConfluenceClient(
+            base_url=cfg.CONFLUENCE_BASE_URL,
+            auth_mode=cfg.CONFLUENCE_AUTH_MODE,
+            pat=cfg.CONFLUENCE_PAT,
+            username=cfg.CONFLUENCE_USERNAME,
+            password=cfg.CONFLUENCE_PASSWORD,
+            timeout_seconds=cfg.CONFLUENCE_REQUEST_TIMEOUT_SECONDS,
+        )
+        self.file_ingestor = file_ingestor or FileByteIngestor()
+
+    def is_configured(self) -> tuple[bool, str | None]:
+        cfg = _load_settings()
+        if not cfg.CONFLUENCE_BASE_URL:
+            return False, "CONFLUENCE_BASE_URL is not configured"
+        if cfg.CONFLUENCE_AUTH_MODE == "pat" and not cfg.CONFLUENCE_PAT:
+            return False, "CONFLUENCE_PAT is required for pat auth"
+        return True, None
+
+    def _build_cql(self) -> str:
+        cfg = _load_settings()
+        if cfg.CONFLUENCE_CQL:
+            return f"type=attachment and ({cfg.CONFLUENCE_CQL})"
+        if cfg.CONFLUENCE_SPACE_KEYS:
+            keys = [k.strip() for k in cfg.CONFLUENCE_SPACE_KEYS.split(",") if k.strip()]
+            if keys:
+                return "type=attachment and space in (" + ",".join(f'\"{k}\"' for k in keys) + ")"
+        return "type=attachment"
+
+    def list_descriptors(self, tenant_id: str, sync_context: SyncContext) -> list[SourceDescriptor]:
+        cql = self._build_cql()
+        out: list[SourceDescriptor] = []
+        start = 0
+        while len(out) < sync_context.max_items_per_run:
+            page = self.client.list_attachments(cql=cql, start=start, limit=sync_context.page_size)
+            if not page:
+                break
+            for entry in page:
+                attachment_id = str(entry.get("id") or "")
+                if not attachment_id:
+                    continue
+                container = entry.get("container") if isinstance(entry.get("container"), dict) else {}
+                container_id = str(container.get("id") or "")
+                version = entry.get("version") if isinstance(entry.get("version"), dict) else {}
+                last_modified = _parse_dt(version.get("when"))
+                metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+                media_type = metadata.get("mediaType") or ""
+                out.append(
+                    SourceDescriptor(
+                        source_type=self.source_type,
+                        external_ref=f"attachment:{attachment_id}",
+                        title=str(entry.get("title") or attachment_id),
+                        last_modified=last_modified,
+                        checksum_hint=f"v:{version.get('number')}" if version.get("number") is not None else None,
+                        metadata={"attachment_id": attachment_id, "container_id": container_id, "media_type": media_type},
+                    )
+                )
+                if len(out) >= sync_context.max_items_per_run:
+                    break
+            start += sync_context.page_size
+        return out
+
+    def fetch_item(self, tenant_id: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
+        attachment_id = str(descriptor.metadata.get("attachment_id") or descriptor.external_ref.replace("attachment:", ""))
+        try:
+            payload = self.client.fetch_attachment_by_id(attachment_id)
+            links = payload.get("_links") if isinstance(payload.get("_links"), dict) else {}
+            download = str(links.get("download") or "")
+            if not download:
+                return ConnectorFetchResult(error=ConnectorError("C-ATTACHMENT-MISSING-DOWNLOAD", f"No download URL for attachment:{attachment_id}"))
+            raw_bytes = self.client.download_attachment(download)
+        except httpx.HTTPError as exc:
+            return ConnectorFetchResult(error=ConnectorError("C-ATTACHMENT-FETCH-FAILED", str(exc), retryable=True))
+
+        filename = str(payload.get("title") or descriptor.title or f"{attachment_id}.bin")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in FileByteIngestor.SUPPORTED_EXTENSIONS:
+            media_type = (payload.get("metadata") or {}).get("mediaType") if isinstance(payload.get("metadata"), dict) else None
+            inferred = _extension_from_media_type(media_type)
+            if inferred and inferred in FileByteIngestor.SUPPORTED_EXTENSIONS:
+                base_name = Path(filename).stem if suffix else filename
+                filename = f"{base_name}{inferred}"
+                suffix = inferred
+            else:
+                return ConnectorFetchResult(
+                    error=ConnectorError("C-ATTACHMENT-UNSUPPORTED-TYPE", f"Unsupported attachment extension: {suffix or '<none>'}")
+                )
+
+        try:
+            converted = self.file_ingestor.ingest_bytes(filename=filename, payload=raw_bytes)
+        except (ValueError, RuntimeError) as exc:
+            return ConnectorFetchResult(error=ConnectorError("C-ATTACHMENT-CONVERT-FAILED", str(exc)))
+
+        links = payload.get("_links") if isinstance(payload.get("_links"), dict) else {}
+        webui = links.get("webui") or ""
+        base = links.get("base") or _load_settings().CONFLUENCE_BASE_URL.rstrip("/")
+        url = f"{base}{webui}" if webui else ""
+        container = payload.get("container") if isinstance(payload.get("container"), dict) else {}
+
+        return ConnectorFetchResult(
+            item=SourceItem(
+                source_type=self.source_type,
+                external_ref=descriptor.external_ref,
+                title=filename,
+                markdown=converted.markdown,
+                url=url,
+                labels=list(converted.labels),
+                metadata={
+                    "attachmentId": attachment_id,
+                    "containerId": container.get("id"),
+                    "containerType": container.get("type"),
+                    "mediaType": (payload.get("metadata") or {}).get("mediaType") if isinstance(payload.get("metadata"), dict) else None,
                 },
             )
         )
