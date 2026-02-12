@@ -98,28 +98,40 @@ class FileByteIngestor:
             return "unordered"
         return "ordered"
 
-    def _paragraph_to_markdown(self, paragraph, numbered_index: int) -> tuple[str | None, int]:
+    def _list_key(self, paragraph, level: int) -> tuple[str, int] | None:
+        p_pr = getattr(paragraph._p, "pPr", None)
+        if p_pr is None or getattr(p_pr, "numPr", None) is None or getattr(p_pr.numPr, "numId", None) is None:
+            return None
+        try:
+            return str(p_pr.numPr.numId.val), int(level)
+        except (TypeError, ValueError):
+            return None
+
+    def _paragraph_to_markdown(self, paragraph, numbered_map: dict[tuple[str, int], int]) -> tuple[str | None, dict[tuple[str, int], int]]:
         text = paragraph.text.strip()
         if not text:
-            return None, numbered_index
+            return None, numbered_map
 
         style = (paragraph.style.name or "").lower() if paragraph.style else ""
         if style.startswith("heading"):
             level = "".join(ch for ch in style if ch.isdigit()) or "1"
-            return f"{'#' * max(1, int(level))} {text}", numbered_index
+            return f"{'#' * max(1, int(level))} {text}", numbered_map
 
         list_level = self._list_level(paragraph)
         indentation = self._list_prefix(list_level)
 
         list_kind = self._list_kind(paragraph, style, list_level)
         if list_kind == "unordered":
-            return f"{indentation}- {text}", numbered_index
+            return f"{indentation}- {text}", numbered_map
 
         if list_kind == "ordered":
-            numbered_index += 1
-            return f"{indentation}{numbered_index}. {text}", numbered_index
+            key = self._list_key(paragraph, list_level)
+            if key is None:
+                key = ("fallback", list_level)
+            numbered_map[key] = numbered_map.get(key, 0) + 1
+            return f"{indentation}{numbered_map[key]}. {text}", numbered_map
 
-        return text, numbered_index
+        return text, numbered_map
 
     def _docx_to_markdown(self, payload: bytes) -> str:
         import docx
@@ -128,13 +140,13 @@ class FileByteIngestor:
 
         document = docx.Document(io.BytesIO(payload))
         lines: list[str] = []
-        numbered_index = 0
+        numbered_map: dict[tuple[str, int], int] = {}
 
         parent = document.element.body
         for child in parent.iterchildren():
             if child.tag.endswith("}p"):
                 paragraph = Paragraph(child, document)
-                rendered, numbered_index = self._paragraph_to_markdown(paragraph, numbered_index)
+                rendered, numbered_map = self._paragraph_to_markdown(paragraph, numbered_map)
                 if rendered:
                     lines.append(rendered)
                 continue

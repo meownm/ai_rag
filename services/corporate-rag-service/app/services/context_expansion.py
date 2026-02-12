@@ -18,6 +18,8 @@ class ExpansionDebugInfo:
     redundancy_filtered_count: int
     final_context_token_estimate: int
     context_selection_steps: list[str]
+    expanded_total: int
+    expanded_per_doc: dict[str, int]
 
 
 class ContextExpansionEngine:
@@ -57,6 +59,7 @@ class ContextExpansionEngine:
         if mode == "neighbor":
             expanded_neighbor = list(base)
             extra_added = 0
+            expanded_per_doc: dict[str, int] = {}
             for anchor in base:
                 neighbors = self.repo.fetch_document_neighbors(
                     str(anchor.get("document_id")),
@@ -72,6 +75,8 @@ class ContextExpansionEngine:
                     n["added_by_neighbor"] = True
                     expanded_neighbor.append(n)
                     extra_added += 1
+                    doc_key = str(anchor.get("document_id"))
+                    expanded_per_doc[doc_key] = expanded_per_doc.get(doc_key, 0) + 1
             deduped = self._dedup(expanded_neighbor)
             filtered, redundancy_filtered = self._redundancy_filter(deduped)
             steps.extend([
@@ -89,12 +94,15 @@ class ContextExpansionEngine:
                 redundancy_filtered_count=redundancy_filtered,
                 final_context_token_estimate=debug.final_context_token_estimate,
                 context_selection_steps=debug.context_selection_steps,
+                expanded_total=extra_added,
+                expanded_per_doc=expanded_per_doc,
             )
 
         expanded: list[dict] = list(base)
         extra_added = 0
         neighbors_added = 0
         links_added = 0
+        expanded_per_doc: dict[str, int] = {}
 
         docs_ranked = sorted(
             self._group_docs(base).items(),
@@ -113,6 +121,8 @@ class ContextExpansionEngine:
                 for n in neighbors:
                     if extra_added >= settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
                         break
+                    if expanded_per_doc.get(str(doc_id), 0) >= settings.CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC:
+                        continue
                     if self._contains_chunk(expanded, str(n["chunk_id"])):
                         continue
                     n["final_score"] = float(anchor.get("final_score", 0.0)) * 0.92
@@ -120,6 +130,7 @@ class ContextExpansionEngine:
                     expanded.append(n)
                     extra_added += 1
                     neighbors_added += 1
+                    expanded_per_doc[str(doc_id)] = expanded_per_doc.get(str(doc_id), 0) + 1
 
         if mode == "doc_neighbor_plus_links" and extra_added < settings.CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS:
             should_expand_links = self._should_expand_links(base, chosen_docs)
@@ -155,6 +166,8 @@ class ContextExpansionEngine:
             redundancy_filtered_count=redundancy_filtered,
             final_context_token_estimate=debug.final_context_token_estimate,
             context_selection_steps=debug.context_selection_steps,
+            expanded_total=extra_added,
+            expanded_per_doc=expanded_per_doc,
         )
         return selected, info
 
@@ -252,6 +265,8 @@ class ContextExpansionEngine:
             redundancy_filtered_count=0,
             final_context_token_estimate=used_tokens,
             context_selection_steps=steps,
+            expanded_total=0,
+            expanded_per_doc={},
         )
         return ordered, debug
 

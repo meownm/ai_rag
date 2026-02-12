@@ -48,7 +48,7 @@ from app.services.performance import build_stage_budgets, exceeded_budgets
 from app.services.context_expansion import ContextExpansionEngine
 from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SyncContext
 from app.services.connectors.registry import ConnectorRegistry
-from app.services.query_pipeline import apply_context_budget, expand_neighbors
+from app.services.query_pipeline import apply_context_budget, estimate_tokens, expand_neighbors
 from app.services.reranker import RerankerService
 from app.services.retrieval import hybrid_rank
 from app.services.scoring_trace import build_scoring_trace
@@ -143,6 +143,49 @@ def _build_llm_prompt(query: str, contexts: list[dict]) -> str:
     )
 
 
+
+
+def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
+    if not v1 or not v2:
+        return 0.0
+    dot = sum(a * b for a, b in zip(v1, v2))
+    n1 = sum(a * a for a in v1) ** 0.5
+    n2 = sum(b * b for b in v2) ** 0.5
+    if n1 == 0 or n2 == 0:
+        return 0.0
+    return dot / (n1 * n2)
+
+
+
+
+def _should_reset_topic(current_embedding: list[float], previous_embedding: list[float], threshold: float) -> tuple[bool, float]:
+    similarity = _cosine_similarity(current_embedding, previous_embedding)
+    return similarity < float(threshold), similarity
+
+def _trim_history_turns(turns: list[dict]) -> list[dict]:
+    limited = list(turns[-settings.MAX_HISTORY_TURNS:])
+    trimmed: list[dict] = []
+    token_sum = 0
+    for turn in reversed(limited):
+        turn_tokens = estimate_tokens(str(turn.get("text", "")))
+        if token_sum + turn_tokens > settings.MAX_HISTORY_TOKENS:
+            continue
+        trimmed.append(turn)
+        token_sum += turn_tokens
+    return list(reversed(trimmed))
+
+
+
+def _has_invalid_citations(citations_from_model: object, allowed_chunk_ids: set[str]) -> bool:
+    if not isinstance(citations_from_model, list):
+        return True
+    for citation in citations_from_model:
+        if not isinstance(citation, dict):
+            return True
+        if str(citation.get("chunk_id")) not in allowed_chunk_ids:
+            return True
+    return False
+
 def _estimate_token_count(text: str) -> int:
     words = len(text.split())
     return max(1, int(words * 1.33)) if text.strip() else 0
@@ -214,7 +257,7 @@ def _apply_memory_boosting(
             boosted += 1
         updated.append(entry)
 
-    updated.sort(key=lambda x: float(x.get("final_score", 0.0)), reverse=True)
+    updated.sort(key=lambda x: (-float(x.get("final_score", 0.0)), str(x.get("chunk_id"))))
     return updated, boosted
 
 
@@ -536,10 +579,25 @@ def post_query(
         recent_turns: list[dict] = []
         summary_text: str | None = None
         if conversation_repo is not None and conversation_id is not None:
-            recent_turns = [
+            base_turns = [
                 {"role": t.role, "text": t.text}
-                for t in reversed(conversation_repo.list_turns(conversation_id, limit=settings.CONVERSATION_TURNS_LAST_N))
+                for t in reversed(conversation_repo.list_turns(conversation_id, limit=max(settings.CONVERSATION_TURNS_LAST_N, settings.MAX_HISTORY_TURNS + 2)))
             ]
+            recent_turns = _trim_history_turns(base_turns)
+
+            last_user_turn_text = next((str(t.get("text", "")) for t in reversed(base_turns[:-1]) if str(t.get("role", "")).lower() == "user"), "")
+            topic_similarity = 1.0
+            should_reset_topic = False
+            if last_user_turn_text.strip():
+                try:
+                    current_emb = get_embeddings_client().embed_text(safe_query, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
+                    previous_emb = get_embeddings_client().embed_text(last_user_turn_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
+                    should_reset_topic, topic_similarity = _should_reset_topic(current_emb, previous_emb, settings.TOPIC_RESET_SIMILARITY_THRESHOLD)
+                except Exception:
+                    topic_similarity = 1.0
+            if last_user_turn_text.strip() and should_reset_topic:
+                recent_turns = []
+                log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIMILARITY_THRESHOLD})
             latest_summary = conversation_repo.get_latest_summary(conversation_id)
             summary_text = latest_summary.summary_text if latest_summary else None
         try:
@@ -756,6 +814,8 @@ def post_query(
             "redundancy_filtered_count": debug_info.redundancy_filtered_count,
             "final_context_token_estimate": debug_info.final_context_token_estimate,
             "context_selection_steps": debug_info.context_selection_steps,
+            "expanded_total": debug_info.expanded_total,
+            "expanded_per_doc": debug_info.expanded_per_doc,
         }
         emit_metric("context_expansion_enabled_count", 1)
         emit_metric("context_expansion_added_chunks", max(0, len(chosen) - min(len(tenant_safe_ranked), settings.CONTEXT_EXPANSION_TOPK_BASE)))
@@ -833,7 +893,10 @@ def post_query(
 
         parsed = _extract_json_payload(llm_raw)
         citations_from_model = parsed.get("citations") if isinstance(parsed, dict) else None
-        if parsed.get("status") != "success" or not citations_from_model:
+        allowed_chunk_ids = {str(c.get("chunk_id")) for c in chosen}
+        has_invalid_citation = _has_invalid_citations(citations_from_model, allowed_chunk_ids)
+
+        if parsed.get("status") != "success" or has_invalid_citation:
             answer = build_structured_refusal(str(corr), {"reason": "insufficient_evidence", "raw": llm_raw})
             anti_payload = {"refusal_triggered": True, "unsupported_sentences": 0}
             only_sources = "FAIL"

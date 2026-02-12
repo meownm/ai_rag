@@ -1,5 +1,7 @@
 import pytest
 
+pytest.importorskip("pydantic")
+
 from app.core.config import Settings
 
 
@@ -26,3 +28,12 @@ def test_max_context_tokens_cannot_exceed_llm_num_ctx_negative():
 def test_vector_retrieval_enabled_by_default():
     cfg = Settings()
     assert cfg.USE_VECTOR_RETRIEVAL is True
+
+def test_hybrid_weight_sum_validation_negative():
+    with pytest.raises(ValueError, match="must equal 1.0"):
+        Settings(HYBRID_WEIGHT_VECTOR=0.8, HYBRID_WEIGHT_FTS=0.5)
+
+
+def test_hybrid_weight_upper_bound_negative():
+    with pytest.raises(ValueError, match="<= 1.0"):
+        Settings(HYBRID_WEIGHT_VECTOR=1.2, HYBRID_WEIGHT_FTS=0.0)

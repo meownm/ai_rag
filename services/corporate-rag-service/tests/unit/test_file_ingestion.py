@@ -137,7 +137,73 @@ def test_ingest_docx_preserves_nested_numbered_lists():
 
     markdown = FileByteIngestor().ingest_bytes(filename="nested_numbered.docx", payload=stream.getvalue()).markdown
     assert "1. Step 1" in markdown
-    assert "  2. Step 1.1" in markdown
+    assert "  1. Step 1.1" in markdown
+
+
+def test_ingest_docx_preserves_three_level_nested_numbered_lists():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    l0 = doc.add_paragraph("L0")
+    l0.style = "List Number"
+    _set_list_level(l0, 0)
+    l1 = doc.add_paragraph("L1")
+    l1.style = "List Number"
+    _set_list_level(l1, 1)
+    l2 = doc.add_paragraph("L2")
+    l2.style = "List Number"
+    _set_list_level(l2, 2)
+
+    doc.save(stream)
+    markdown = FileByteIngestor().ingest_bytes(filename="three_nested_numbered.docx", payload=stream.getvalue()).markdown
+    assert "1. L0" in markdown
+    assert "  1. L1" in markdown
+    assert "    1. L2" in markdown
+
+
+def test_ingest_docx_preserves_three_level_nested_bullet_lists():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    l0 = doc.add_paragraph("L0")
+    l0.style = "List Bullet"
+    _set_list_level(l0, 0)
+    l1 = doc.add_paragraph("L1")
+    l1.style = "List Bullet"
+    _set_list_level(l1, 1)
+    l2 = doc.add_paragraph("L2")
+    l2.style = "List Bullet"
+    _set_list_level(l2, 2)
+
+    doc.save(stream)
+    markdown = FileByteIngestor().ingest_bytes(filename="three_nested_bullets.docx", payload=stream.getvalue()).markdown
+    assert "- L0" in markdown
+    assert "  - L1" in markdown
+    assert "    - L2" in markdown
+
+
+def test_ingest_docx_numbering_is_separate_per_list_level_and_numid():
+    docx = pytest.importorskip("docx")
+    stream = io.BytesIO()
+    doc = docx.Document()
+
+    a1 = doc.add_paragraph("ListA-1")
+    a1.style = "List Number"
+    _set_list_level(a1, 0)
+    a2 = doc.add_paragraph("ListA-2")
+    a2.style = "List Number"
+    _set_list_level(a2, 0)
+    b1 = doc.add_paragraph("ListB-1")
+    b1.style = "List Number"
+    _set_list_level(b1, 1)
+
+    doc.save(stream)
+    markdown = FileByteIngestor().ingest_bytes(filename="numid_level_tracking.docx", payload=stream.getvalue()).markdown
+    assert "1. ListA-1" in markdown
+    assert "2. ListA-2" in markdown
+    assert "  1. ListB-1" in markdown
 
 
 def test_ingest_docx_preserves_mixed_nested_lists_structure():

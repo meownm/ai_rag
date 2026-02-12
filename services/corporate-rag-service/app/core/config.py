@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     EMBEDDINGS_BATCH_SIZE: int = 64
     EMBEDDINGS_RETRY_ATTEMPTS: int = 3
     USE_VECTOR_RETRIEVAL: bool = True
-    HYBRID_SCORE_NORMALIZATION: bool = False
+    HYBRID_SCORE_NORMALIZATION: bool = True
+    HYBRID_WEIGHT_VECTOR: float = 0.7
+    HYBRID_WEIGHT_FTS: float = 0.3
     USE_CONTEXTUAL_EXPANSION: bool = False
     NEIGHBOR_WINDOW: int = 1
     CONTEXT_EXPANSION_ENABLED: bool = False
@@ -40,6 +42,7 @@ class Settings(BaseSettings):
     CONTEXT_EXPANSION_NEIGHBOR_WINDOW: int = 1
     CONTEXT_EXPANSION_MAX_DOCS: int = 4
     CONTEXT_EXPANSION_MAX_EXTRA_CHUNKS: int = 12
+    CONTEXT_EXPANSION_MAX_EXTRA_PER_DOC: int = 4
     CONTEXT_EXPANSION_MAX_LINK_DOCS: int = 1
     CONTEXT_EXPANSION_REDUNDANCY_SIM_THRESHOLD: float = 0.92
     CONTEXT_EXPANSION_MIN_GAIN: float = 0.01
@@ -52,6 +55,9 @@ class Settings(BaseSettings):
     USE_LLM_GENERATION: bool = False
 
     USE_CONVERSATION_MEMORY: bool = False
+    MAX_HISTORY_TURNS: int = 6
+    MAX_HISTORY_TOKENS: int = 2048
+    TOPIC_RESET_SIMILARITY_THRESHOLD: float = 0.35
     USE_LLM_QUERY_REWRITE: bool = False
     USE_CLARIFICATION_LOOP: bool = False
     CONVERSATION_TURNS_LAST_N: int = 8
@@ -134,6 +140,17 @@ class Settings(BaseSettings):
         if value not in allowed:
             raise ValueError(f"LLM_NUM_CTX must be one of {sorted(allowed)}")
         return value
+
+
+    @model_validator(mode="after")
+    def validate_hybrid_weights(self) -> "Settings":
+        if self.HYBRID_WEIGHT_VECTOR < 0 or self.HYBRID_WEIGHT_FTS < 0:
+            raise ValueError("HYBRID weights must be non-negative")
+        if self.HYBRID_WEIGHT_VECTOR > 1 or self.HYBRID_WEIGHT_FTS > 1:
+            raise ValueError("HYBRID weights must be <= 1.0")
+        if abs((self.HYBRID_WEIGHT_VECTOR + self.HYBRID_WEIGHT_FTS) - 1.0) > 1e-6:
+            raise ValueError("HYBRID_WEIGHT_VECTOR + HYBRID_WEIGHT_FTS must equal 1.0")
+        return self
 
     @model_validator(mode="after")
     def validate_context_window_consistency(self) -> "Settings":

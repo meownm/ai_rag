@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("pydantic")
+
 from app.services.query_pipeline import apply_context_budget
 
 
