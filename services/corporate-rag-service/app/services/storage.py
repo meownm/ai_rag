@@ -30,3 +30,8 @@ class ObjectStorage:
     def get_text(self, bucket: str, key: str) -> str:
         response = self.client.get_object(Bucket=bucket, Key=key)
         return response["Body"].read().decode("utf-8")
+
+
+    def put_bytes(self, bucket: str, key: str, payload: bytes, content_type: str = "application/octet-stream") -> str:
+        self.client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType=content_type)
+        return f"s3://{bucket}/{key}"

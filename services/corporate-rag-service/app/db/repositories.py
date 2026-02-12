@@ -28,8 +28,14 @@ class TenantRepository:
         self.db = db
         self.tenant_id = str(tenant_id)
 
-    def create_job(self, job_type: str, requested_by: str) -> IngestJobs:
-        job = IngestJobs(tenant_id=self.tenant_id, job_type=job_type, job_status="processing", requested_by=requested_by)
+    def create_job(self, job_type: str, requested_by: str, payload: dict | None = None) -> IngestJobs:
+        job = IngestJobs(
+            tenant_id=self.tenant_id,
+            job_type=job_type,
+            job_status="queued",
+            requested_by=requested_by,
+            job_payload_json=payload,
+        )
         self.db.add(job)
         self.db.commit()
         self.db.refresh(job)
@@ -43,10 +49,19 @@ class TenantRepository:
             .first()
         )
 
-    def mark_job(self, job: IngestJobs, status: str, error_code: str | None = None, error_message: str | None = None) -> None:
+    def mark_job(
+        self,
+        job: IngestJobs,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        result_payload: dict | None = None,
+    ) -> None:
         job.job_status = status
         job.error_code = error_code
         job.error_message = error_message
+        if result_payload is not None:
+            job.result_json = result_payload
         if status in {"done", "error", "canceled", "expired"}:
             job.finished_at = datetime.now(timezone.utc)
         self.db.add(job)

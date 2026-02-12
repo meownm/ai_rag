@@ -9,7 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.session import Base
 
 
-SOURCE_TYPE = ("CONFLUENCE_PAGE", "CONFLUENCE_ATTACHMENT", "FILE_CATALOG_OBJECT")
+SOURCE_TYPE = ("CONFLUENCE_PAGE", "CONFLUENCE_ATTACHMENT", "FILE_CATALOG_OBJECT", "FILE_UPLOAD_OBJECT")
 SOURCE_STATUS = ("DISCOVERED", "FETCHED", "NORMALIZED", "INDEXED", "FAILED")
 TENANT_ROLE = ("TENANT_ADMIN", "TENANT_EDITOR", "TENANT_VIEWER")
 CITATIONS_MODE = ("DISABLED", "OPTIONAL", "REQUIRED")
@@ -85,6 +85,7 @@ class ChunkVectors(Base):
     embedding_model: Mapped[str] = mapped_column(String(255))
     embedding = mapped_column(Vector(1024))
     embedding_dim: Mapped[int] = mapped_column(Integer)
+    embedding_input_mode: Mapped[str] = mapped_column(String(32), default="path_text_v1")
 
 
 class IngestJobs(Base):
@@ -98,6 +99,8 @@ class IngestJobs(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    job_payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class SearchCandidates(Base):

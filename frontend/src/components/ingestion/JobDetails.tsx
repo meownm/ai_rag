@@ -16,7 +16,14 @@ export function JobDetails({ jobId }: { jobId?: string }) {
           <p>
             status: <Badge value={data.job_status} />
           </p>
-          {data.error ? <pre className="overflow-auto rounded bg-slate-100 p-2">{JSON.stringify(data.error, null, 2)}</pre> : null}
+          <p>started_at: {data.started_at}</p>
+          <p>finished_at: {data.finished_at ?? '—'}</p>
+          <p>documents: {data.result?.documents ?? 0}</p>
+          <p>chunks: {data.result?.chunks ?? 0}</p>
+          <p>cross_links: {data.result?.cross_links ?? 0}</p>
+          <p>artifacts: {data.result?.artifacts ?? 0}</p>
+          {data.error_code ? <p>error_code: {data.error_code}</p> : null}
+          {data.error_message ? <pre className="overflow-auto rounded bg-slate-100 p-2">{data.error_message}</pre> : null}
         </div>
       ) : null}
     </Card>

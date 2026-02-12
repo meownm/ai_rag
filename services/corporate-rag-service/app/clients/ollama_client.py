@@ -1,14 +1,16 @@
 class OllamaClient:
-    def __init__(self, endpoint: str | None = None, model: str | None = None, timeout_seconds: int | None = None):
+    def __init__(self, endpoint: str | None = None, model: str | None = None, timeout_seconds: int | None = None, num_ctx: int | None = None):
         if endpoint is None or model is None or timeout_seconds is None:
             from app.core.config import settings
 
             endpoint = endpoint or settings.LLM_ENDPOINT
             model = model or settings.LLM_MODEL
             timeout_seconds = timeout_seconds or settings.REQUEST_TIMEOUT_SECONDS
+            num_ctx = num_ctx or settings.LLM_NUM_CTX
         self.endpoint = str(endpoint)
         self.model = str(model)
         self.timeout_seconds = float(timeout_seconds)
+        self.num_ctx = int(num_ctx or 65536)
 
     def generate(self, prompt: str, *, keep_alive: int = 0) -> dict:
         payload = {
@@ -16,7 +18,7 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
             "keep_alive": keep_alive,
-            "options": {"temperature": 0, "top_p": 1},
+            "options": {"temperature": 0, "top_p": 1, "num_ctx": self.num_ctx},
         }
         import httpx
 

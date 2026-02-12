@@ -123,4 +123,10 @@ class JobStatusResponse(BaseModel):
     requested_by: str
     started_at: datetime
     finished_at: datetime | None = None
-    error: ErrorEnvelope | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    result: dict[str, Any] | None = None
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobStatusResponse]

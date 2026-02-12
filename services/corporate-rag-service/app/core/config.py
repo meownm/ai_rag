@@ -1,4 +1,4 @@
-from pydantic import computed_field
+from pydantic import computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     LLM_ENDPOINT: str = "http://localhost:11434/api/generate"
     LLM_MODEL: str = "qwen3:14b-instruct"
     LLM_API_KEY: str = ""
+    LLM_NUM_CTX: int = 65536
+    OLLAMA_KEEP_ALIVE_SECONDS: int = 20
 
     REQUEST_TIMEOUT_SECONDS: int = 30
     EMBEDDINGS_TIMEOUT_SECONDS: int = 30
@@ -85,6 +87,15 @@ class Settings(BaseSettings):
     MIN_LEXICAL_OVERLAP: float = 0.25
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="forbid")
+
+
+    @field_validator("LLM_NUM_CTX")
+    @classmethod
+    def validate_llm_num_ctx(cls, value: int) -> int:
+        allowed = {65536, 131072, 262144}
+        if value not in allowed:
+            raise ValueError(f"LLM_NUM_CTX must be one of {sorted(allowed)}")
+        return value
 
     @computed_field
     @property

@@ -17,6 +17,9 @@ export const JobStatusResponseSchema = z.object({
   started_at: z.string(),
   finished_at: z.string().nullable().optional(),
   error: ErrorEnvelopeSchema.optional(),
+  error_code: z.string().nullable().optional(),
+  error_message: z.string().nullable().optional(),
+  result: z.record(z.any()).nullable().optional(),
 });
 
 export type JobAcceptedResponse = z.infer<typeof JobAcceptedResponseSchema>;
