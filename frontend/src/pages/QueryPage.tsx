@@ -29,7 +29,7 @@ function buildClarificationOptions(query: string): string[] {
   return [];
 }
 
-function toAssistantPayload(response: QueryResponse) {
+function toAssistantPayload(response: QueryResponse, dynamicTopK: number) {
   const summary = response.answer.split('\n')[0] ?? response.answer;
   const details = response.answer;
   return {
@@ -38,11 +38,12 @@ function toAssistantPayload(response: QueryResponse) {
     sources: response.citations ?? [],
     debug: {
       interpretedQuery: summary,
-      dynamicTopK: response.citations?.length ?? 0,
+      dynamicTopK,
       chunksUsed: response.citations?.length ?? 0,
-      coverageRatio: response.citations && response.citations.length > 0 ? 1 : 0,
+      coverageRatio: dynamicTopK > 0 ? (response.citations?.length ?? 0) / dynamicTopK : 0,
       modelContextWindow: 8192,
       confidence: response.only_sources_verdict === 'PASS' ? 1 : 0,
+      agentTrace: ((response.trace?.scoring_trace ?? []).slice(0, 4)).map((entry, idx) => ({ stage: `stage_${idx + 1}`, latencyMs: Math.round((entry.final_score ?? 0) * 100) })),
     },
   };
 }
@@ -70,6 +71,8 @@ export function QueryPage() {
   const [showSources, setShowSources] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [debugEnabled, setDebugEnabled] = useState(false);
+  const [lastSubmittedQuery, setLastSubmittedQuery] = useState<string | null>(null);
+  const maxClarificationDepth = 2;
 
   const canUseDebug = useMemo(() => UI_MODE === 'debug' || roles.includes('admin') || roles.includes('debug'), [roles]);
   const showDebug = canUseDebug && debugEnabled;
@@ -81,8 +84,9 @@ export function QueryPage() {
     }
 
     setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text: value }]);
+    setLastSubmittedQuery(value);
 
-    if (clarificationDepth < 2) {
+    if (clarificationDepth < maxClarificationDepth) {
       const options = buildClarificationOptions(value);
       if (options.length > 1) {
         setClarifications(options);
@@ -92,8 +96,9 @@ export function QueryPage() {
     }
 
     try {
-      const response = await mutation.mutateAsync({ query: value });
-      setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', assistant: toAssistantPayload(response), raw: response }]);
+      const dynamicTopK = Math.max(3, Math.min(10, Math.ceil(value.length / 24)));
+      const response = await mutation.mutateAsync({ query: value, top_k: dynamicTopK });
+      setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', assistant: toAssistantPayload(response, dynamicTopK), raw: response }]);
       setClarificationDepth(0);
     } catch (error) {
       const apiError = error as ApiError;
@@ -111,10 +116,20 @@ export function QueryPage() {
 
   return (
     <div className="grid min-h-[calc(100vh-9rem)] grid-rows-[auto_1fr_auto] gap-3">
-      <header className="flex flex-wrap items-center justify-between gap-2 rounded border bg-white p-3">
+      <header className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-2 rounded border bg-white p-3">
         <div className="text-lg font-semibold">Conversational RAG UI</div>
         <div className="flex gap-2">
-          <button className="rounded border px-3 py-1 text-sm" onClick={() => setMessages([])}>
+          <button
+            className="rounded border px-3 py-1 text-sm"
+            onClick={() => {
+              setMessages([]);
+              setQuery('');
+              setClarifications([]);
+              setClarificationDepth(0);
+              setSelectedCitationIndex(null);
+              setLastSubmittedQuery(null);
+            }}
+          >
             New Dialog
           </button>
           <button className="rounded border px-3 py-1 text-sm" onClick={() => setShowSources((prev) => !prev)}>
@@ -154,7 +169,7 @@ export function QueryPage() {
         </aside>
       </main>
 
-      <footer className="rounded border bg-white p-3">
+      <footer className="sticky bottom-0 z-20 rounded border bg-white p-3">
         <form
           className="flex gap-2"
           onSubmit={(event) => {
@@ -194,7 +209,7 @@ export function QueryPage() {
         }}
       />
 
-      <ChunkPreviewModal citation={selectedCitation ?? null} onClose={() => setSelectedCitationIndex(null)} />
+      <ChunkPreviewModal citation={selectedCitation ?? null} highlightTerm={lastSubmittedQuery} onClose={() => setSelectedCitationIndex(null)} />
     </div>
   );
 }

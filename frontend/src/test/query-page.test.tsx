@@ -29,6 +29,7 @@ describe('QueryPage conversational UI', () => {
           only_sources_verdict: 'PASS',
           citations: [{ chunk_id: '1', document_id: 'd', title: 'Doc', url: 'u', snippet: 'Snippet' }],
           correlation_id: 'c',
+          trace: { trace_id: 'c', scoring_trace: [{ chunk_id: '1', lex_score: 1, vec_score: 1, rerank_score: 1, boosts_applied: [], final_score: 0.77, rank_position: 1 }] },
         }),
       }),
     );
@@ -39,17 +40,26 @@ describe('QueryPage conversational UI', () => {
 
     await waitFor(() => expect(screen.getByText('Summary')).toBeInTheDocument());
     expect(screen.getAllByText('Doc').length).toBeGreaterThan(0);
+    expect(screen.getByText('Details')).toBeInTheDocument();
+    expect(screen.getAllByText('Sources').length).toBeGreaterThan(0);
   });
 
-  it('shows clarification modal and blocks free-text path for ambiguous slash query', async () => {
-    vi.stubGlobal('fetch', vi.fn());
+  it('shows clarification modal and uses radio + apply only flow', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ answer: 'Resolved', only_sources_verdict: 'PASS', citations: [], correlation_id: 'c' }) });
+    vi.stubGlobal('fetch', fetchMock);
     renderPage();
 
     fireEvent.change(screen.getByPlaceholderText('Ask a question...'), { target: { value: 'vacation/sick leave' } });
     fireEvent.click(screen.getByText('Send'));
 
     expect(screen.getByText('Уточните вопрос')).toBeInTheDocument();
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByText('Применить')).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText('sick leave'));
+    fireEvent.click(screen.getByText('Применить'));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
   it('maps refusal message safely', async () => {
@@ -63,13 +73,24 @@ describe('QueryPage conversational UI', () => {
     expect(screen.queryByText(/Traceback/)).not.toBeInTheDocument();
   });
 
-  it('allows debug toggle for admin and renders debug fields', async () => {
+  it('allows debug toggle for admin and renders debug fields with agent trace', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
-        json: async () => ({ answer: 'Summary', only_sources_verdict: 'PASS', citations: [], correlation_id: 'c' }),
+        json: async () => ({
+          answer: 'Summary',
+          only_sources_verdict: 'PASS',
+          citations: [],
+          correlation_id: 'c',
+          trace: {
+            trace_id: 'c',
+            scoring_trace: [
+              { chunk_id: '1', lex_score: 1, vec_score: 1, rerank_score: 1, boosts_applied: [], final_score: 0.99, rank_position: 1 },
+            ],
+          },
+        }),
       }),
     );
     renderPage(['admin']);
@@ -80,5 +101,47 @@ describe('QueryPage conversational UI', () => {
     fireEvent.click(screen.getByText('Send'));
 
     await waitFor(() => expect(screen.getByText(/Interpreted query/)).toBeInTheDocument());
+    expect(screen.getByText(/Agent trace/)).toBeInTheDocument();
+    expect(screen.getByText(/Dynamic top_k/)).toBeInTheDocument();
+    expect(screen.getByText(/Coverage ratio/)).toBeInTheDocument();
   });
+
+  it('opens source preview modal with highlight', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          answer: 'Summary line',
+          only_sources_verdict: 'PASS',
+          citations: [{ chunk_id: '1', document_id: 'd', title: 'Doc', url: 'u', snippet: 'policy snippet only' }],
+          correlation_id: 'c',
+        }),
+      }),
+    );
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText('Ask a question...'), { target: { value: 'vacation policy' } });
+    fireEvent.click(screen.getByText('Send'));
+
+    await waitFor(() => expect(screen.getAllByText('Doc').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText('Doc')[0]);
+
+    expect(screen.getByText('Закрыть')).toBeInTheDocument();
+    expect(document.querySelector('mark')).not.toBeNull();
+  });
+
+  it('resets dialog state via New Dialog button', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ answer: 'Summary', only_sources_verdict: 'PASS', citations: [], correlation_id: 'c' }) }));
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText('Ask a question...'), { target: { value: 'vacation/sick leave' } });
+    fireEvent.click(screen.getByText('Send'));
+    expect(screen.getByText('Уточните вопрос')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('New Dialog'));
+    await waitFor(() => expect(screen.queryByText('Уточните вопрос')).not.toBeInTheDocument());
+  });
+
 });
