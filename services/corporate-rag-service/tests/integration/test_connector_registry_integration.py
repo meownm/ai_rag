@@ -12,9 +12,12 @@ class FakeConnector:
         return True, None
 
     def list_descriptors(self, tenant_id, sync_context):
-        from app.services.connectors.base import SourceDescriptor
+        from app.services.connectors.base import ConnectorListResult, SourceDescriptor
 
-        return [SourceDescriptor(source_type=self.source_type, external_ref="fs:int.md", title="Integration", checksum_hint="h1")]
+        return ConnectorListResult(
+            descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:int.md", title="Integration", checksum_hint="h1")],
+            listing_complete=True,
+        )
 
     def fetch_item(self, tenant_id, descriptor):
         from app.services.connectors.base import ConnectorFetchResult, SourceItem

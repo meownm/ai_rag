@@ -13,7 +13,7 @@ Any change violating these constraints is a **release blocker** unless explicitl
    Ingested source snapshots and version identifiers must be immutable once recorded, with object keys scoped as `tenant_id/source_id/source_version_id/*` and overwrite prevention at storage write time.
 
 2. **Tombstone only after authoritative listing**  
-   Deletions/tombstones are allowed only when connector listing explicitly reports `listing_complete=true`; if listing is truncated/incomplete, tombstones are skipped and warning telemetry is emitted.
+   Deletions/tombstones are allowed only when connector listing explicitly reports `listing_complete=true`; if listing is truncated/incomplete, tombstones are skipped and structured warning telemetry `event_type=sync.tombstone.skipped` with `reason=listing_not_authoritative` is emitted.
 
 3. **Deterministic retrieval**  
    Retrieval/ranking behavior for stable inputs must remain deterministic with strict tie-break ordering: `(final_score DESC, source_preference DESC, chunk_id ASC)` after deduplication.

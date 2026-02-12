@@ -336,7 +336,7 @@ def test_upsert_chunk_vectors_retries_then_succeeds(monkeypatch):
     assert calls["n"] == 3
     sql_text = "\n".join(call[0] for call in db.calls)
     assert "LEFT JOIN chunk_vectors" in sql_text
-    assert "ON CONFLICT (chunk_id) DO UPDATE" in sql_text
+    assert "ON CONFLICT (tenant_id, chunk_id) DO UPDATE" in sql_text
     assert "updated_at = now()" in sql_text
 
 
@@ -585,7 +585,7 @@ def test_insert_chunks_writes_metadata_columns_positive(monkeypatch):
 
 
 def test_file_upload_source_type_is_ingested_via_connector_registry(monkeypatch):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
     from app.services.ingestion import ingest_sources_sync
 
     class UploadConnector:
@@ -595,7 +595,10 @@ def test_file_upload_source_type_is_ingested_via_connector_registry(monkeypatch)
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [SourceDescriptor(source_type=self.source_type, external_ref="upload:1", title="upload.txt")]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="upload:1", title="upload.txt")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             item = SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title=descriptor.title, markdown="hello")
@@ -668,7 +671,7 @@ def test_should_fetch_positive_and_negative():
 
 
 def test_incremental_state_prevents_duplicate_fetch(monkeypatch):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
 
     class FakeConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -680,7 +683,10 @@ def test_incremental_state_prevents_duplicate_fetch(monkeypatch):
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             self.fetch_calls += 1
@@ -740,7 +746,7 @@ def test_chm_sp4_embedding_text_contains_heading_path_positive():
 
 
 def test_fcs_sp3_incremental_skip_emits_log(monkeypatch, caplog):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
 
     class FakeConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -752,7 +758,10 @@ def test_fcs_sp3_incremental_skip_emits_log(monkeypatch, caplog):
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="same")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             self.fetch_calls += 1
@@ -787,7 +796,7 @@ def test_fcs_sp3_incremental_skip_emits_log(monkeypatch, caplog):
 
 
 def test_fcs_sp5_updated_file_creates_new_version(monkeypatch):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
 
     class MutableConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -799,14 +808,17 @@ def test_fcs_sp5_updated_file_creates_new_version(monkeypatch):
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [
-                SourceDescriptor(
-                    source_type=self.source_type,
-                    external_ref="fs:a.md",
-                    title="A",
-                    checksum_hint=f"h{self.rev}",
-                )
-            ]
+            return ConnectorListResult(
+                descriptors=[
+                    SourceDescriptor(
+                        source_type=self.source_type,
+                        external_ref="fs:a.md",
+                        title="A",
+                        checksum_hint=f"h{self.rev}",
+                    )
+                ],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown=f"# A {self.rev}"))
@@ -843,7 +855,7 @@ def test_fcs_sp5_updated_file_creates_new_version(monkeypatch):
 
 
 def test_fcs_sp6_deleted_file_marked_in_sync_state(monkeypatch):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
 
     class MutableConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -856,8 +868,11 @@ def test_fcs_sp6_deleted_file_marked_in_sync_state(monkeypatch):
 
         def list_descriptors(self, tenant_id, sync_context):
             if not self.include:
-                return []
-            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="h1")]
+                return ConnectorListResult(descriptors=[], listing_complete=True)
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint="h1")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown="# A"))
@@ -948,8 +963,66 @@ def test_sp1_skip_tombstone_when_descriptor_listing_hits_cap(monkeypatch, caplog
     ingest_sources_sync(db=object(), tenant_id=uuid.uuid4(), source_types=["FILE_CATALOG_OBJECT"], connector_registry=FakeRegistry())
 
     assert FakeRepo.deleted_calls == []
-    assert any(rec.event == "connector_skip_tombstone_due_to_cap" for rec in caplog.records)
+    skipped = [rec for rec in caplog.records if getattr(rec, "event_type", "") == "sync.tombstone.skipped"]
+    assert skipped
+    assert skipped[0].reason == "listing_not_authoritative"
 
+
+
+
+def test_sp1_skip_tombstone_for_legacy_connector_without_listing_metadata(monkeypatch):
+    from app.services.connectors.base import SourceDescriptor
+
+    class LegacyConnector:
+        source_type = "FILE_CATALOG_OBJECT"
+
+        def is_configured(self):
+            return True, None
+
+        def list_descriptors(self, tenant_id, sync_context):
+            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A")]
+
+        def fetch_item(self, tenant_id, descriptor):
+            return type("R", (), {"error": None, "item": None, "raw_payload": None})()
+
+    class FakeRegistry:
+        def get(self, source_type):
+            return LegacyConnector()
+
+    class FakeRepo:
+        deleted_calls = []
+
+        def __init__(self, _db):
+            pass
+
+        def get_state(self, *_args, **_kwargs):
+            return None
+
+        def list_external_refs(self, *_args, **_kwargs):
+            return ["fs:legacy.md"]
+
+        def mark_deleted(self, **kwargs):
+            self.deleted_calls.append(kwargs)
+
+        def mark_failure(self, **_kwargs):
+            return None
+
+        def mark_success(self, **_kwargs):
+            return None
+
+    class FakeSettings:
+        CONNECTOR_REGISTRY_ENABLED = True
+        CONNECTOR_SYNC_MAX_ITEMS_PER_RUN = 2
+        CONNECTOR_SYNC_PAGE_SIZE = 100
+        CONNECTOR_INCREMENTAL_ENABLED = True
+
+    monkeypatch.setattr("app.services.ingestion.settings", FakeSettings())
+    monkeypatch.setattr("app.services.ingestion.SourceSyncStateRepository", FakeRepo)
+    monkeypatch.setattr("app.services.ingestion.ingest_source_items", lambda *_args, **_kwargs: {"documents": 0, "chunks": 0, "cross_links": 0, "artifacts": 0})
+
+    ingest_sources_sync(db=object(), tenant_id=uuid.uuid4(), source_types=["FILE_CATALOG_OBJECT"], connector_registry=FakeRegistry())
+
+    assert FakeRepo.deleted_calls == []
 
 def test_sp1_mark_tombstone_when_descriptor_listing_complete(monkeypatch):
     from app.services.connectors.base import ConnectorListResult, SourceDescriptor
@@ -1027,13 +1100,13 @@ def test_sp2_s3_keys_include_source_version_id(monkeypatch):
     ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=storage)
 
     keys = [key for _bucket, key, _payload in storage.put_calls]
-    assert any(key.endswith("/raw.txt") and key.count("/") >= 3 for key in keys)
+    assert any(key.endswith("/raw.bin") and key.count("/") >= 3 for key in keys)
     assert any(key.endswith("/normalized.md") and key.count("/") >= 3 for key in keys)
     assert any("/artifacts/ingestion.json" in key and key.count("/") >= 4 for key in keys)
 
 
 def test_sp2_different_source_versions_write_to_distinct_s3_paths(monkeypatch):
-    from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SourceItem
+    from app.services.connectors.base import ConnectorFetchResult, ConnectorListResult, SourceDescriptor, SourceItem
 
     class MutableConnector:
         source_type = "FILE_CATALOG_OBJECT"
@@ -1045,7 +1118,10 @@ def test_sp2_different_source_versions_write_to_distinct_s3_paths(monkeypatch):
             return True, None
 
         def list_descriptors(self, tenant_id, sync_context):
-            return [SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint=f"v{self.rev}")]
+            return ConnectorListResult(
+                descriptors=[SourceDescriptor(source_type=self.source_type, external_ref="fs:a.md", title="A", checksum_hint=f"v{self.rev}")],
+                listing_complete=True,
+            )
 
         def fetch_item(self, tenant_id, descriptor):
             return ConnectorFetchResult(item=SourceItem(source_type=self.source_type, external_ref=descriptor.external_ref, title="A", markdown=f"# A {self.rev}"))
@@ -1118,3 +1194,32 @@ def test_sp5_document_links_insert_populates_tenant_id(monkeypatch):
     link_calls = [(sql, params) for sql, params in db.calls if "INSERT INTO document_links" in sql]
     assert link_calls
     assert all(call_params.get("tenant_id") == tenant for _sql, call_params in link_calls)
+
+
+def test_sp2_requires_immutable_storage_methods(monkeypatch):
+    class LegacyStorage:
+        def put_text(self, bucket: str, key: str, text: str) -> str:
+            return f"s3://{bucket}/{key}"
+
+    db = FakeDb()
+    tenant = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+    class FakeEmbeddingsClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def embed_texts(self, texts, **_kwargs):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    monkeypatch.setattr("app.services.ingestion.EmbeddingsClient", FakeEmbeddingsClient)
+
+    with pytest.raises(RuntimeError, match="S-STORAGE-IMMUTABLE-WRITE-REQUIRED"):
+        ingest_sources_sync(db, tenant, ["CONFLUENCE_PAGE"], confluence=FakeConfluence(), storage=LegacyStorage())
+
+
+def test_pipeline_trace_documents_versioned_markdown_artifact_paths():
+    from pathlib import Path
+
+    text = Path("docs/pipeline_trace.md").read_text(encoding="utf-8")
+    assert "<markdown-bucket>/<tenant>/<source>/<source_version>/normalized.md" in text
+    assert "<markdown-bucket>/<tenant>/<source>/<source_version>/artifacts/ingestion.json" in text

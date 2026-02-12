@@ -117,3 +117,11 @@ At startup the service now:
 - Token budget enforcement applies `TOKEN_BUDGET_SAFETY_MARGIN` and deterministic tail truncation when needed.
 - Topic reset can be toggled with `TOPIC_RESET_ENABLED` and thresholded by `TOPIC_RESET_SIM_THRESHOLD`.
 - Citation validation now requires `(chunk_id, document_id)` pairs to exist in the selected context allowlist.
+
+
+## INT-SP2 Immutable Versioned Storage
+
+- Raw payload is stored only as immutable `raw.bin` under `tenant_id/source_id/source_version_id/`.
+- Ingestion requires immutable storage methods (`put_bytes_immutable`, `put_text_immutable`) and fails fast if unavailable.
+- `source_versions.checksum` is enforced from raw content bytes to avoid duplicate identical versions while preserving new versions for changed content.
+- Existing historical data remains readable because persisted `s3_raw_uri`/`s3_markdown_uri` values are unchanged (no destructive migration).

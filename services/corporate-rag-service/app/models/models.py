@@ -83,6 +83,7 @@ class Chunks(Base):
 
 class ChunkVectors(Base):
     __tablename__ = "chunk_vectors"
+    __table_args__ = (UniqueConstraint("tenant_id", "chunk_id", name="uq_chunk_vectors_tenant_chunk"),)
     chunk_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chunks.chunk_id"), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     embedding_model: Mapped[str] = mapped_column(String(255))

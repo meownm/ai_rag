@@ -878,7 +878,7 @@ def _upsert_chunk_vectors(db: Session, tenant_id: uuid.UUID, chunk_ids: list[uui
                     """
                     INSERT INTO chunk_vectors (chunk_id, tenant_id, embedding_model, embedding, embedding_dim, embedding_input_mode)
                     VALUES (:chunk_id, :tenant_id, :embedding_model, CAST(:embedding AS vector), :embedding_dim, :embedding_input_mode)
-                    ON CONFLICT (chunk_id) DO UPDATE
+                    ON CONFLICT (tenant_id, chunk_id) DO UPDATE
                     SET tenant_id = EXCLUDED.tenant_id,
                         embedding_model = EXCLUDED.embedding_model,
                         embedding = EXCLUDED.embedding,
@@ -968,40 +968,31 @@ def ingest_source_items(
         cfg = _load_settings()
         raw_payload = raw_payloads.get(item.external_ref)
 
-        checksum = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        raw_bytes = raw_payload if raw_payload is not None else item.markdown.encode("utf-8")
+        checksum = hashlib.sha256(raw_bytes).hexdigest()
         source_version_id = _find_source_version_id(db, source_id, checksum)
         if source_version_id is None:
             source_version_id = uuid.uuid4()
-            raw_key = f"{tenant_id}/{source_id}/{source_version_id}/raw.bin" if raw_payload is not None else f"{tenant_id}/{source_id}/{source_version_id}/raw.txt"
+            raw_key = f"{tenant_id}/{source_id}/{source_version_id}/raw.bin"
             md_key = f"{tenant_id}/{source_id}/{source_version_id}/normalized.md"
-            if raw_payload is not None and hasattr(storage, "put_bytes_immutable"):
-                raw_uri = storage.put_bytes_immutable(
-                    cfg.S3_BUCKET_RAW,
-                    raw_key,
-                    raw_payload,
-                    checksum_hex=hashlib.sha256(raw_payload).hexdigest(),
-                )
-            elif raw_payload is not None and hasattr(storage, "put_bytes"):
-                raw_uri = storage.put_bytes(cfg.S3_BUCKET_RAW, raw_key, raw_payload)
-            elif hasattr(storage, "put_text_immutable"):
-                raw_uri = storage.put_text_immutable(
-                    cfg.S3_BUCKET_RAW,
-                    raw_key,
-                    item.markdown,
-                    checksum_hex=hashlib.sha256(item.markdown.encode("utf-8")).hexdigest(),
-                )
-            else:
-                raw_uri = storage.put_text(cfg.S3_BUCKET_RAW, raw_key, item.markdown)
 
-            if hasattr(storage, "put_text_immutable"):
-                md_uri = storage.put_text_immutable(
-                    cfg.S3_BUCKET_MARKDOWN,
-                    md_key,
-                    markdown,
-                    checksum_hex=hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
-                )
-            else:
-                md_uri = storage.put_text(cfg.S3_BUCKET_MARKDOWN, md_key, markdown)
+            if not hasattr(storage, "put_bytes_immutable"):
+                raise RuntimeError("S-STORAGE-IMMUTABLE-WRITE-REQUIRED")
+            raw_uri = storage.put_bytes_immutable(
+                cfg.S3_BUCKET_RAW,
+                raw_key,
+                raw_bytes,
+                checksum_hex=checksum,
+            )
+
+            if not hasattr(storage, "put_text_immutable"):
+                raise RuntimeError("S-STORAGE-IMMUTABLE-WRITE-REQUIRED")
+            md_uri = storage.put_text_immutable(
+                cfg.S3_BUCKET_MARKDOWN,
+                md_key,
+                markdown,
+                checksum_hex=hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+            )
             source_version_id, created_source_version = _insert_source_version(db, source_id, checksum, raw_uri, md_uri, source_version_id=source_version_id)
         else:
             created_source_version = False
@@ -1097,7 +1088,9 @@ def ingest_sources_sync(
             listing_complete = bool(list_result.listing_complete)
         else:
             descriptors = list_result[: settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN]
-            listing_complete = len(descriptors) < settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN
+            # Legacy connectors that do not return ConnectorListResult are treated
+            # as non-authoritative for tombstone safety.
+            listing_complete = False
         counters["descriptors_listed"] += len(descriptors)
         seen_refs_by_source_type[source_type] = {d.external_ref for d in descriptors}
         listing_complete_by_source_type[source_type] = listing_complete
@@ -1140,9 +1133,11 @@ def ingest_sources_sync(
         listing_complete = listing_complete_by_source_type.get(source_type, True)
         if not listing_complete:
             LOGGER.warning(
-                "connector_skip_tombstone_due_to_cap",
+                "sync.tombstone.skipped",
                 extra={
-                    "event": "connector_skip_tombstone_due_to_cap",
+                    "event": "sync.tombstone.skipped",
+                    "event_type": "sync.tombstone.skipped",
+                    "reason": "listing_not_authoritative",
                     "tenant_id": str(tenant_id),
                     "source_type": source_type,
                     "max_items_per_run": settings.CONNECTOR_SYNC_MAX_ITEMS_PER_RUN,
