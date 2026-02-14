@@ -10,7 +10,7 @@ def test_env_example_uses_supported_setting_names_only():
     assert all(not line.startswith("PORT=") for line in lines)
     assert all(not line.startswith("S3_ENDPOINT_URL=") for line in lines)
     assert all(not line.startswith("S3_BUCKET=") for line in lines)
-    assert any(line.startswith("RAG_SERVICE_PORT=") for line in lines)
+    assert any(line.startswith("SERVICE_PORT=") for line in lines)
     assert "MODEL_CONTEXT_WINDOW=" in env_text
     assert "LLM_NUM_CTX=" in env_text
 

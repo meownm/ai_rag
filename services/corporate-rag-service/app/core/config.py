@@ -1,4 +1,7 @@
-from pydantic import computed_field, field_validator, model_validator
+import logging
+import os
+
+from pydantic import AliasChoices, Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,7 +9,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "corporate-rag-service"
     APP_VERSION: str = "1.0.0"
     HOST: str = "0.0.0.0"
-    RAG_SERVICE_PORT: int = 8100
+    SERVICE_PORT: int = Field(default=8100, validation_alias=AliasChoices("SERVICE_PORT", "RAG_SERVICE_PORT", "PORT"))
 
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
@@ -24,8 +27,6 @@ class Settings(BaseSettings):
     S3_REGION: str = "us-east-1"
     S3_SECURE: bool = False
 
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.1"
     EMBEDDINGS_SERVICE_URL: str = "http://localhost:8200"
     EMBEDDINGS_SERVICE_PORT: int = 8200
     EMBEDDINGS_DEFAULT_MODEL_ID: str = "bge-m3"
@@ -122,8 +123,8 @@ class Settings(BaseSettings):
     RERANKER_TOP_K: int = 20
 
     LLM_PROVIDER: str = "ollama"
-    LLM_ENDPOINT: str = "http://localhost:11434/api/generate"
-    LLM_MODEL: str = "qwen3:14b-instruct"
+    LLM_ENDPOINT: str = Field(default="http://localhost:11434/api/generate", validation_alias=AliasChoices("LLM_ENDPOINT", "OLLAMA_BASE_URL"))
+    LLM_MODEL: str = Field(default="qwen3:14b-instruct", validation_alias=AliasChoices("LLM_MODEL", "OLLAMA_MODEL"))
     LLM_API_KEY: str = ""
     LLM_NUM_CTX: int = 65536
     OLLAMA_KEEP_ALIVE_SECONDS: int = 20
@@ -155,6 +156,27 @@ class Settings(BaseSettings):
         return value
 
 
+
+
+    @field_validator("LLM_PROVIDER")
+    @classmethod
+    def validate_llm_provider(cls, value: str) -> str:
+        allowed = {"ollama", "openai", "other"}
+        normalized = value.lower().strip()
+        if normalized not in allowed:
+            raise ValueError(f"LLM_PROVIDER must be one of {sorted(allowed)}")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_numeric_ranges(self) -> "Settings":
+        if self.DEFAULT_TOP_K < 1:
+            raise ValueError("DEFAULT_TOP_K must be >= 1")
+        if self.RERANKER_TOP_K < 1:
+            raise ValueError("RERANKER_TOP_K must be >= 1")
+        if self.REQUEST_TIMEOUT_SECONDS < 1:
+            raise ValueError("REQUEST_TIMEOUT_SECONDS must be >= 1")
+        return self
+
     @model_validator(mode="after")
     def validate_hybrid_weights(self) -> "Settings":
         if abs(self.HYBRID_WEIGHT_VECTOR - self.HYBRID_W_VECTOR) > 1e-6:
@@ -175,6 +197,41 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_CONTEXT_WINDOW must be equal to LLM_NUM_CTX")
         if self.MAX_CONTEXT_TOKENS > self.LLM_NUM_CTX:
             raise ValueError("MAX_CONTEXT_TOKENS must be less than or equal to LLM_NUM_CTX")
+        return self
+
+    @model_validator(mode="after")
+    def validate_deprecated_aliases(self) -> "Settings":
+        logger = logging.getLogger(__name__)
+
+        if os.getenv("RAG_SERVICE_PORT"):
+            logger.warning("RAG_SERVICE_PORT is deprecated; use SERVICE_PORT")
+        if os.getenv("PORT"):
+            logger.warning("PORT is deprecated; use SERVICE_PORT")
+        if os.getenv("OLLAMA_MODEL"):
+            logger.warning("OLLAMA_MODEL is deprecated; use LLM_MODEL")
+        if os.getenv("OLLAMA_BASE_URL"):
+            logger.warning("OLLAMA_BASE_URL is deprecated; use LLM_ENDPOINT")
+
+        if os.getenv("SERVICE_PORT") and os.getenv("RAG_SERVICE_PORT"):
+            if os.getenv("SERVICE_PORT") != os.getenv("RAG_SERVICE_PORT"):
+                raise ValueError("SERVICE_PORT and RAG_SERVICE_PORT are both set with different values")
+        if os.getenv("SERVICE_PORT") and os.getenv("PORT"):
+            if os.getenv("SERVICE_PORT") != os.getenv("PORT"):
+                raise ValueError("SERVICE_PORT and PORT are both set with different values")
+
+        if os.getenv("LLM_MODEL") and os.getenv("OLLAMA_MODEL"):
+            if os.getenv("LLM_MODEL") != os.getenv("OLLAMA_MODEL"):
+                raise ValueError("LLM_MODEL and OLLAMA_MODEL are both set with different values")
+        if os.getenv("LLM_ENDPOINT") and os.getenv("OLLAMA_BASE_URL"):
+            normalized_ollama = f"{os.getenv('OLLAMA_BASE_URL', '').rstrip('/')}/api/generate"
+            if os.getenv("LLM_ENDPOINT") not in {os.getenv("OLLAMA_BASE_URL"), normalized_ollama}:
+                raise ValueError("LLM_ENDPOINT and OLLAMA_BASE_URL are both set with different values")
+
+        if os.getenv("OLLAMA_BASE_URL") and not os.getenv("LLM_ENDPOINT"):
+            endpoint = self.LLM_ENDPOINT.rstrip("/")
+            if not endpoint.endswith("/api/generate"):
+                self.LLM_ENDPOINT = f"{endpoint}/api/generate"
+
         return self
 
     @model_validator(mode="after")

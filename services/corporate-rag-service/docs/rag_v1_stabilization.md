@@ -37,8 +37,8 @@ At startup the service now:
 
 ## Windows Scripts
 
-- `run_local.bat` reads `PORT` from `.env`, sets window title, prints Swagger URL before `uvicorn` startup, and pauses on error.
-- `deploy_docker_desktop.bat` reads `RAG_SERVICE_PORT` from `.env`, avoids hardcoded port assumptions, prints Swagger URL, and pauses on error.
+- `run_local.bat` reads `SERVICE_PORT` from `.env` (supports deprecated `RAG_SERVICE_PORT`/`PORT`), sets window title, prints Swagger URL before `uvicorn` startup, and pauses on error.
+- `deploy_docker_desktop.bat` reads `SERVICE_PORT` from `.env` (supports deprecated `RAG_SERVICE_PORT`/`PORT`), avoids hardcoded port assumptions, prints Swagger URL, and pauses on error.
 
 ## Production Critical Hardening
 
