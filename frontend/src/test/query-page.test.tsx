@@ -62,6 +62,37 @@ describe('QueryPage conversational UI', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 
+
+  it('shows friendly fallback message when backend error is non-json', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        headers: { get: () => 'text/plain' },
+        text: async () => 'bad gateway',
+      }),
+    );
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText('Ask a question...'), { target: { value: 'status?' } });
+    fireEvent.click(screen.getByText('Send'));
+
+    await waitFor(() => expect(screen.getByText('Не удалось получить ответ. Попробуйте повторить запрос позже.')).toBeInTheDocument());
+  });
+
+
+
+  it('shows friendly fallback message when backend error text has no content-type', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('gateway timeout', { status: 504 })));
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText('Ask a question...'), { target: { value: 'status check?' } });
+    fireEvent.click(screen.getByText('Send'));
+
+    await waitFor(() => expect(screen.getByText('Не удалось получить ответ. Попробуйте повторить запрос позже.')).toBeInTheDocument());
+  });
+
   it('maps refusal message safely', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ error: { code: 'ONLY_SOURCES_VIOLATION', message: 'Policy blocked', correlation_id: 'c', retryable: false, timestamp: '2024-01-01T00:00:00Z' } }) }));
     renderPage();

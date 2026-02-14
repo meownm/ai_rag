@@ -14,6 +14,30 @@ export class ApiError extends Error {
   }
 }
 
+async function readResponsePayload(response: Response): Promise<unknown> {
+  const contentType = response.headers?.get?.('content-type')?.toLowerCase() ?? '';
+
+  if (contentType.includes('application/json')) {
+    return response.json().catch(() => undefined);
+  }
+
+  if (!contentType) {
+    const clone = response.clone?.();
+    const clonedJson = clone?.json ? await clone.json().catch(() => undefined) : undefined;
+    if (clonedJson !== undefined) {
+      return clonedJson;
+    }
+
+    const directJson = response.json ? await response.json().catch(() => undefined) : undefined;
+    if (directJson !== undefined) {
+      return directJson;
+    }
+  }
+
+  const rawText = response.text ? await response.text().catch(() => '') : '';
+  return rawText.trim() ? rawText : undefined;
+}
+
 export async function apiFetch<T>(path: string, init: RequestInit, schema: z.ZodType<T>): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
@@ -23,7 +47,7 @@ export async function apiFetch<T>(path: string, init: RequestInit, schema: z.Zod
     },
   });
 
-  const payload = await response.json().catch(() => undefined);
+  const payload = await readResponsePayload(response);
 
   if (!response.ok) {
     const parsedError = ErrorEnvelopeSchema.safeParse(payload);

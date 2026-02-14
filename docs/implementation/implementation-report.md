@@ -172,3 +172,47 @@ IMPLEMENTATION COMPLETE
 - Quality gate report recorded.
 - Release recommendation set to blocked pending dependency restore + drift reconciliation.
 - Runtime behavior unchanged at this stage.
+
+
+## Agent refactor run log (frontend HTTP payload resilience)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| discovery | baseline of `apiFetch` parsing and UI error handling | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | confirmed baseline prior to refactor |
+| requirements | invariant capture (no contract drift, preserve ApiError semantics) | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | requirements fixed before code changes |
+| redesign_refactor | helper extraction design for response payload decoding | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | planned JSON-first fallback to text |
+| simplify | implemented `readResponsePayload` and optional-header-safe parsing | `frontend/src/api/http.ts`, `frontend/src/test/api-http.test.ts`, `frontend/src/test/query-page.test.tsx` | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | includes positive/negative + UI integration failure scenario |
+| document | synchronized frontend docs for HTTP behavior | `frontend/README.md` | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | documented plain-text failure payload behavior |
+| verify | final focused frontend gate for changed scope | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx`; `pytest -q` | pass/warn | frontend tests pass, repo-wide pytest still blocked by missing python deps |
+
+
+## Agent refactor run log (frontend HTTP payload resilience v2)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| discovery | re-check risk in no-content-type payload parsing | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | baseline confirmed before v2 patch |
+| requirements | preserve contracts: Zod on success, ApiError on non-2xx | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | no API contract changes |
+| redesign_refactor | body decoding redesign to avoid single-read pitfalls | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | planned clone-safe + direct-json fallback |
+| simplify | implemented clone-safe no-content-type logic and optional method guards | `frontend/src/api/http.ts`, `frontend/src/test/api-http.test.ts`, `frontend/src/test/query-page.test.tsx` | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | added positive/negative + integration scenarios |
+| document | synchronized frontend API client notes | `frontend/README.md` | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx` | pass | docs include missing content-type fallback behavior |
+| verify | focused + repo-wide gate | none | `npm --prefix frontend run test -- src/test/api-http.test.ts src/test/query-page.test.tsx`; `pytest -q` | pass/warn | frontend suite passes; backend pytest still blocked by missing deps |
+
+
+## Orchestrator implementation update
+
+- Added strict YAML-order workflow CLI orchestrator: `tools/refactor_orchestrator.py`.
+- Added orchestrator test suite with positive/negative/integration coverage: `tools/tests/test_refactor_orchestrator.py`.
+- Generated full-cycle run report artifact: `docs/implementation/refactor_orchestrator_run.md`.
+- Simplified orchestrator run artifact volume by clipping per-check output with configurable `--max-output-lines` while preserving stage/check statuses and tail diagnostics.
+
+
+## Agent cleanup run log (safe orchestrator simplification)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| discovery | identify report bloat and safe cleanup targets in orchestrator scope | none | `pytest -q tools/tests/test_refactor_orchestrator.py` | pass | baseline green before cleanup |
+| requirements | preserve invariants: YAML order and stage status semantics | none | `pytest -q tools/tests/test_refactor_orchestrator.py` | pass | no behavior-changing deletions allowed |
+| redesign_refactor | add output clipping control without status logic changes | `tools/refactor_orchestrator.py`, `tools/tests/test_refactor_orchestrator.py` | `pytest -q tools/tests/test_refactor_orchestrator.py` | pass | added clipping helper + tests |
+| simplify | regenerate orchestrator report with clipped outputs | `docs/implementation/refactor_orchestrator_run.md` | `pytest -q tools/tests/test_refactor_orchestrator.py` | pass | artifact reduced while keeping stage/check results |
+| document | sync guide and implementation report | `docs/agent_orchestration_guide.md`, `docs/implementation/implementation-report.md` | `pytest -q tools/tests/test_refactor_orchestrator.py` | pass | documented `--max-output-lines` behavior |
+| verify | final checks in current environment | none | `python tools/refactor_orchestrator.py --max-output-lines 120 --report docs/implementation/refactor_orchestrator_run.md`; `pytest -q` | warn | orchestrator exits 1 on verify fail; pytest blocked by missing python deps |
