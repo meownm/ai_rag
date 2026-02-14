@@ -24,3 +24,9 @@ npm run dev
 npm run test
 npm run build
 ```
+
+## API client behavior
+
+- `apiFetch` now safely reads JSON and plain-text responses, including fallback when `content-type` is missing.
+- For successful responses, schema validation still uses Zod.
+- For non-2xx responses, `ApiError.payload` stores parsed JSON when possible, otherwise raw text (for upstream proxy/gateway errors).

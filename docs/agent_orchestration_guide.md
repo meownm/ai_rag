@@ -353,3 +353,19 @@ python scripts/drift_detector.py
 ```
 
 Если проверка не проходит из-за окружения, этап помечается `warn`, причина фиксируется явно, а merge блокируется до снятия блокера.
+
+
+## CLI-оркестратор полного цикла
+
+Для автоматического прогона всех этапов в строгом YAML-порядке добавлен CLI:
+
+```bash
+python tools/refactor_orchestrator.py --report docs/implementation/refactor_orchestrator_run.md --max-output-lines 120
+```
+
+Что делает оркестратор:
+- выполняет этапы в порядке: `discovery -> requirements -> redesign_refactor -> simplify -> document -> verify`;
+- на каждом этапе запускает проверки из YAML (`pytest -q`, на `verify` дополнительно `python tools/drift_check.py`);
+- фиксирует статус этапа (`pass/warn/fail`) и полный тест-лог в markdown-отчёте;
+- возвращает exit code `1`, если хотя бы один этап завершился `fail`.
+- поддерживает безопасную чистку избыточного отчёта через `--max-output-lines` (по умолчанию 120 строк на check), без изменения логики статусов.
