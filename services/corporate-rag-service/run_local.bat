@@ -6,6 +6,8 @@ title Corporate RAG Service - Local Run
 set "SERVICE_PORT=8100"
 if exist ".env" (
   for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+    if /I "%%~A"=="SERVICE_PORT" set "SERVICE_PORT=%%~B"
+    if /I "%%~A"=="RAG_SERVICE_PORT" set "SERVICE_PORT=%%~B"
     if /I "%%~A"=="PORT" set "SERVICE_PORT=%%~B"
   )
 )
