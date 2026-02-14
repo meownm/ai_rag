@@ -183,3 +183,34 @@ LLM должен быть устойчив к RU регламентному яз
 | REQ-M5 | anti_hallucination module |
 | REQ-M6 | observability |
 | REQ-M7 | startup config |
+
+
+---
+
+## Stage 2/6 (`requirements`) — актуализация реестра
+
+### Каталог текущих требований (baseline)
+- `CUR-REQ-01`: memory/lifecycle диалога по tenant/session.
+- `CUR-REQ-02`: embedding + indexing + vector retrieval.
+- `CUR-REQ-03`: query rewrite/clarification без искажения интента.
+- `CUR-REQ-04`: explainable hybrid normalization + memory boosting.
+- `CUR-REQ-05`: contextual expansion + token budget assembly.
+- `CUR-REQ-06`: grounded generation + conversation summarization.
+- `CUR-REQ-07`: ingestion markdown-only + chunking alignment.
+
+Источник детализации: `docs/contracts/requirements_traceability_stage2.md`.
+
+### Кандидаты на расширение (совместимые)
+- `EXT-REQ-A`: machine-readable contract -> tests mapping.
+- `EXT-REQ-B`: SLO полноты retrieval trace.
+- `EXT-REQ-C`: stage-gated quality checklist c min pass policy.
+
+### Результат этапа
+- `requirements_catalog` — готов.
+- `traceability_matrix` — готов.
+- `extension_candidates` — готов.
+
+### Проверка этапа
+- Команда: `pytest -q`
+- Статус: `warn` (test collection blocked in environment)
+- Причина: отсутствуют зависимости `pydantic`, `sqlalchemy`, `pythonjsonlogger`.
