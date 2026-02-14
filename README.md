@@ -42,3 +42,7 @@ Release hardening for `services/corporate-rag-service` follows stop points `REL-
 - Install scripts: `install.bat` and `deploy_docker_desktop.bat` enforce pause-on-error behavior.
 - Documentation: see `docs/architecture.md`, `docs/pipeline_trace.md`, `docs/observability.md`, `docs/security_and_access.md`.
 - Versioning: changelog maintained in `services/corporate-rag-service/CHANGELOG.md`.
+
+
+## Documentation
+- [Agent orchestration guide](docs/agent_orchestration_guide.md)

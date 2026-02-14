@@ -109,3 +109,66 @@ IMPLEMENTATION COMPLETE
 - Answer generation now calls Ollama (non-streaming) with strict grounded JSON protocol and refusal fallback when parsing/citations/validation fail.
 - Conservative context budgeting is applied using word-count proxy with deterministic low-score dropping and budget telemetry.
 - Ingestion now attempts vector upsert and per-chunk weighted FTS upsert hooks for inserted chunks, with DB event logging around index stages/errors.
+
+
+## Discovery run log (YAML stage 1/6)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| discovery | module map + call graph + risk hotspots | `docs/architecture.md`, `docs/pipeline_trace.md`, `docs/implementation/implementation-report.md` | `pytest -q` | warn | test collection blocked by missing local dependencies (`pydantic`, `sqlalchemy`, `pythonjsonlogger`) |
+
+### Discovery outcome
+- Baseline module map documented.
+- Service-level call graph documented.
+- Primary refactor risk hotspots documented.
+- No runtime code paths changed.
+
+
+## Redesign/Refactor run log (YAML stage 3/6)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| redesign_refactor | refactor plan + migration strategy + PR batches | `docs/implementation/stage3_refactor_plan.md`, `docs/implementation/implementation-report.md` | `pytest -q` | warn | test collection blocked by missing local dependencies (`pydantic`, `sqlalchemy`, `pythonjsonlogger`) |
+
+### Redesign/Refactor outcome
+- Refactor plan documented.
+- Migration strategy documented.
+- PR batch decomposition documented.
+- Runtime behavior unchanged at this stage.
+
+
+## Simplify run log (YAML stage 4/6)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| simplify | duplication registry + simplification patch plan | `docs/implementation/stage4_simplification_registry.md`, `docs/implementation/implementation-report.md` | `pytest -q` | warn | test collection blocked by missing local dependencies (`pydantic`, `sqlalchemy`, `pythonjsonlogger`) |
+
+### Simplify outcome
+- Duplication registry documented.
+- Simplification patch backlog documented.
+- Runtime behavior unchanged at this stage.
+
+
+## Document run log (YAML stage 5/6)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| document | contracts/algorithms/data-structures/call-graph sync | `docs/contracts/stage5_contracts_sync.md`, `docs/observability.md`, `docs/implementation/implementation-report.md` | `pytest -q` | warn | test collection blocked by missing local dependencies (`pydantic`, `sqlalchemy`, `pythonjsonlogger`) |
+
+### Document outcome
+- Contracts synchronization recorded.
+- Algorithm/data-structure summaries synchronized.
+- Observability contract note added.
+- Runtime behavior unchanged at this stage.
+
+
+## Verify run log (YAML stage 6/6)
+
+| stage | scope | changed files | tests command | result | notes |
+|---|---|---|---|---|---|
+| verify | final quality gate report + release recommendation | `docs/implementation/stage6_gate_report.md`, `docs/implementation/implementation-report.md` | `pytest -q`; `python tools/drift_check.py` | warn/fail | pytest blocked by missing deps; drift_check reports contract drift |
+
+### Verify outcome
+- Quality gate report recorded.
+- Release recommendation set to blocked pending dependency restore + drift reconciliation.
+- Runtime behavior unchanged at this stage.
