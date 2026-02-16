@@ -17,12 +17,8 @@ def lexical_score(query: str, text: str) -> float:
 
 
 def vector_score(query_embedding: list[float], embedding: list[float]) -> float:
-    dot = sum(a * b for a, b in zip(query_embedding, embedding))
-    nq = sum(a * a for a in query_embedding) ** 0.5
-    nd = sum(a * a for a in embedding) ** 0.5
-    if nq == 0 or nd == 0:
-        return 0.0
-    return dot / (nq * nd)
+    from app.core.math_utils import cosine_similarity
+    return cosine_similarity(query_embedding, embedding)
 
 
 def min_max_normalize(values: list[float]) -> list[float]:
@@ -94,8 +90,8 @@ def hybrid_rank(
     rerank_raws = [float(c.get("rerank_score", 0.0)) for c in candidates]
     rerank_norms = min_max_normalize(rerank_raws) if normalize_scores else rerank_raws
 
-    weight_vec = float(settings.HYBRID_W_VECTOR)
-    weight_fts = float(settings.HYBRID_W_FTS)
+    weight_vec = float(settings.HYBRID_WEIGHT_VECTOR)
+    weight_fts = float(settings.HYBRID_WEIGHT_FTS)
 
     for c, lex_norm, vec_norm, rerank_raw, rerank_norm in zip(candidates, lex_norms, vec_norms, rerank_raws, rerank_norms):
         boost = 0.05 if c.get("author") else 0.0

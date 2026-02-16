@@ -41,12 +41,10 @@ from app.services.agent_pipeline import (
     RewriteAgentInput,
 )
 from app.core.logging import get_request_id, log_event, set_request_context
-from app.services.audit import log_event as audit_log_event
-from app.services.file_ingestion import FileByteIngestor
+from app.services.audit import write_audit_event as audit_log_event
 from app.services.ingestion import ingest_sources_sync
 from app.services.performance import build_stage_budgets, exceeded_budgets
 from app.services.context_expansion import ContextExpansionEngine
-from app.services.connectors.base import ConnectorFetchResult, SourceDescriptor, SyncContext
 from app.services.connectors.registry import ConnectorRegistry
 from app.services.query_pipeline import apply_context_budget, estimate_tokens, expand_neighbors
 from app.services.reranker import RerankerService
@@ -145,33 +143,20 @@ def _build_llm_prompt(query: str, contexts: list[dict]) -> str:
 
 
 def _cosine_similarity(v1: list[float], v2: list[float]) -> float:
-    if not v1 or not v2:
-        return 0.0
-    dot = sum(a * b for a, b in zip(v1, v2))
-    n1 = sum(a * a for a in v1) ** 0.5
-    n2 = sum(b * b for b in v2) ** 0.5
-    if n1 == 0 or n2 == 0:
-        return 0.0
-    return dot / (n1 * n2)
+    from app.core.math_utils import cosine_similarity
+    return cosine_similarity(v1, v2)
 
 
 
 
 def _should_reset_topic(current_embedding: list[float], previous_embedding: list[float], threshold: float) -> tuple[bool, float]:
-    similarity = _cosine_similarity(current_embedding, previous_embedding)
-    return similarity < float(threshold), similarity
+    from app.services.conversation_manager import ConversationManager
+    result = ConversationManager.detect_topic_reset(current_embedding, previous_embedding, threshold)
+    return result.should_reset, result.similarity
 
 def _trim_history_turns(turns: list[dict]) -> list[dict]:
-    limited = list(turns[-settings.MAX_HISTORY_TURNS:])
-    trimmed: list[dict] = []
-    token_sum = 0
-    for turn in reversed(limited):
-        turn_tokens = estimate_tokens(str(turn.get("text", "")))
-        if token_sum + turn_tokens > settings.MAX_HISTORY_TOKENS:
-            continue
-        trimmed.append(turn)
-        token_sum += turn_tokens
-    return list(reversed(trimmed))
+    from app.services.conversation_manager import ConversationManager
+    return ConversationManager._trim_history_turns(turns)
 
 
 
@@ -199,8 +184,8 @@ def _assert_prompt_within_num_ctx(prompt: str) -> None:
         raise ValueError("TOKEN_BUDGET_EXCEEDED")
 
 def _estimate_token_count(text: str) -> int:
-    words = len(text.split())
-    return max(1, int(words * 1.33)) if text.strip() else 0
+    from app.core.token_utils import estimate_tokens as _et
+    return _et(text)
 
 
 def _build_retrieval_only_answer(contexts: list[dict]) -> str:
@@ -209,13 +194,11 @@ def _build_retrieval_only_answer(contexts: list[dict]) -> str:
 
 
 def _is_plain_log_mode() -> bool:
-    return settings.LOG_DATA_MODE.strip().lower() == "plain"
+    return settings.is_plain_log_mode()
 
 
 def _is_debug_allowed(debug_requested: bool, user_role: str | None) -> bool:
-    if not debug_requested:
-        return False
-    return (user_role or "").strip().lower() == settings.DEBUG_ADMIN_ROLE.strip().lower()
+    return settings.is_debug_allowed(debug_requested, user_role)
 
 
 def _fetch_candidates(db: Session, tenant_id: str, query: str, query_embedding: list[float], top_n: int) -> tuple[list[dict], int, int, int]:
@@ -245,32 +228,8 @@ def _apply_memory_boosting(
     previous_trace_items: list[object],
     max_boost: float = 0.12,
 ) -> tuple[list[dict], int]:
-    boosts_by_key: dict[tuple[str, str], float] = {}
-    for rank, item in enumerate(previous_trace_items[:20]):
-        try:
-            if not bool(getattr(item, "used_in_answer", False)):
-                continue
-            doc_id = str(getattr(item, "document_id"))
-            chunk_id = str(getattr(item, "chunk_id"))
-            recency = max(0.3, 1.0 - (rank * 0.2))
-            boosts_by_key[(doc_id, chunk_id)] = max(boosts_by_key.get((doc_id, chunk_id), 0.0), max_boost * recency)
-        except Exception:  # noqa: BLE001
-            continue
-
-    boosted = 0
-    updated = []
-    for entry in candidates:
-        doc_id = str(entry.get("document_id"))
-        chunk_id = str(entry.get("chunk_id"))
-        boost = min(max_boost, boosts_by_key.get((doc_id, chunk_id), 0.0))
-        if boost > 0:
-            entry["final_score"] = float(entry.get("final_score", 0.0)) + boost
-            entry.setdefault("boosts_applied", []).append({"name": "memory_reuse_boost", "value": boost, "reason": "recent_answer_reuse"})
-            boosted += 1
-        updated.append(entry)
-
-    updated.sort(key=lambda x: (-float(x.get("final_score", 0.0)), str(x.get("chunk_id"))))
-    return updated, boosted
+    from app.services.conversation_manager import ConversationManager
+    return ConversationManager._boost_from_trace(candidates, previous_trace_items, max_boost)
 
 
 
@@ -306,32 +265,10 @@ def _build_retrieval_trace_rows(
     ranked_candidates: list[dict],
     chosen_candidates: list[dict],
 ) -> list[dict]:
-    chosen_ids = {str(c.get("chunk_id")) for c in chosen_candidates}
-    citation_ranks = {str(c.get("chunk_id")): idx + 1 for idx, c in enumerate(chosen_candidates)}
-    rows: list[dict] = []
-    for idx, candidate in enumerate(ranked_candidates, start=1):
-        doc_id = _safe_uuid(candidate.get("document_id"))
-        chunk_id = _safe_uuid(candidate.get("chunk_id"))
-        if doc_id is None or chunk_id is None:
-            continue
-        candidate_id = str(candidate.get("chunk_id"))
-        rows.append(
-            {
-                "conversation_id": conversation_id,
-                "turn_id": turn_id,
-                "document_id": doc_id,
-                "chunk_id": chunk_id,
-                "ordinal": idx,
-                "score_lex_raw": float(candidate.get("lex_raw", candidate.get("lex_score", 0.0))),
-                "score_vec_raw": float(candidate.get("vec_raw", candidate.get("vec_score", 0.0))),
-                "score_rerank_raw": float(candidate.get("rerank_raw", candidate.get("rerank_score", 0.0))),
-                "score_final": float(candidate.get("final_score", 0.0)),
-                "used_in_context": candidate_id in chosen_ids,
-                "used_in_answer": candidate_id in chosen_ids,
-                "citation_rank": citation_ranks.get(candidate_id),
-            }
-        )
-    return rows
+    from app.services.conversation_manager import ConversationManager
+    return ConversationManager.build_retrieval_trace_rows(
+        conversation_id, turn_id, ranked_candidates, chosen_candidates,
+    )
 
 
 
@@ -437,25 +374,9 @@ async def upload_file_for_ingestion(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> JobAcceptedResponse:
+    from app.services.connectors.upload import UploadConnector
+
     content = await file.read()
-
-    class UploadConnector:
-        source_type = "FILE_UPLOAD_OBJECT"
-
-        def __init__(self, upload_name: str, upload_payload: bytes) -> None:
-            self._filename = upload_name or "upload.bin"
-            self._payload = upload_payload
-            self._item = FileByteIngestor().ingest_bytes(filename=self._filename, payload=upload_payload)
-
-        def is_configured(self) -> tuple[bool, str | None]:
-            return True, None
-
-        def list_descriptors(self, tenant: str, sync_context: SyncContext) -> list[SourceDescriptor]:
-            return [SourceDescriptor(source_type=self.source_type, external_ref=self._item.external_ref, title=self._item.title)]
-
-        def fetch_item(self, tenant: str, descriptor: SourceDescriptor) -> ConnectorFetchResult:
-            return ConnectorFetchResult(item=self._item, raw_payload=self._payload)
-
     try:
         upload_connector = UploadConnector(file.filename or "upload.bin", content)
     except ValueError as exc:
@@ -597,13 +518,13 @@ def post_query(
                 try:
                     current_emb = get_embeddings_client().embed_text(safe_query, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
                     previous_emb = get_embeddings_client().embed_text(last_user_turn_text, tenant_id=str(payload.tenant_id), correlation_id=str(corr))
-                    should_reset_topic, topic_similarity = _should_reset_topic(current_emb, previous_emb, settings.TOPIC_RESET_SIM_THRESHOLD)
+                    should_reset_topic, topic_similarity = _should_reset_topic(current_emb, previous_emb, settings.TOPIC_RESET_SIMILARITY_THRESHOLD)
                     should_reset_topic = bool(settings.TOPIC_RESET_ENABLED) and should_reset_topic
                 except Exception:
                     topic_similarity = 1.0
             if last_user_turn_text.strip() and should_reset_topic:
                 recent_turns = []
-                audit_log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIM_THRESHOLD})
+                audit_log_event(db, str(payload.tenant_id), str(corr), "PIPELINE_STAGE", {"event": "topic_reset", "topic_similarity": topic_similarity, "threshold": settings.TOPIC_RESET_SIMILARITY_THRESHOLD})
             latest_summary = conversation_repo.get_latest_summary(conversation_id)
             summary_text = latest_summary.summary_text if latest_summary else None
         try:

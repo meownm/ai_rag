@@ -9,8 +9,8 @@ from app.services.retrieval import hybrid_rank
 
 
 def test_hybrid_then_budget_flow_is_deterministic_integration(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
 
     candidates = [
         {"chunk_id": "c3", "chunk_text": "policy three", "embedding": [0.4, 0.6], "lex_score": 0.4, "vec_score": 0.4, "rerank_score": 0.0, "final_score": 0.0},

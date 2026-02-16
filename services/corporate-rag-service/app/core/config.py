@@ -1,4 +1,4 @@
-from pydantic import computed_field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,8 +35,6 @@ class Settings(BaseSettings):
     HYBRID_SCORE_NORMALIZATION: bool = True
     HYBRID_WEIGHT_VECTOR: float = 0.7
     HYBRID_WEIGHT_FTS: float = 0.3
-    HYBRID_W_VECTOR: float = 0.7
-    HYBRID_W_FTS: float = 0.3
     HYBRID_MAX_VECTOR: int = 20
     HYBRID_MAX_FTS: int = 20
     USE_CONTEXTUAL_EXPANSION: bool = False
@@ -63,7 +61,6 @@ class Settings(BaseSettings):
     MAX_HISTORY_TURNS: int = 6
     MAX_HISTORY_TOKENS: int = 2048
     TOPIC_RESET_ENABLED: bool = True
-    TOPIC_RESET_SIM_THRESHOLD: float = 0.35
     TOPIC_RESET_SIMILARITY_THRESHOLD: float = 0.35
     USE_LLM_QUERY_REWRITE: bool = False
     USE_CLARIFICATION_LOOP: bool = False
@@ -157,10 +154,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_hybrid_weights(self) -> "Settings":
-        if abs(self.HYBRID_WEIGHT_VECTOR - self.HYBRID_W_VECTOR) > 1e-6:
-            raise ValueError("HYBRID_WEIGHT_VECTOR and HYBRID_W_VECTOR must match")
-        if abs(self.HYBRID_WEIGHT_FTS - self.HYBRID_W_FTS) > 1e-6:
-            raise ValueError("HYBRID_WEIGHT_FTS and HYBRID_W_FTS must match")
         if self.HYBRID_WEIGHT_VECTOR < 0 or self.HYBRID_WEIGHT_FTS < 0:
             raise ValueError("HYBRID weights must be non-negative")
         if self.HYBRID_WEIGHT_VECTOR > 1 or self.HYBRID_WEIGHT_FTS > 1:
@@ -177,16 +170,13 @@ class Settings(BaseSettings):
             raise ValueError("MAX_CONTEXT_TOKENS must be less than or equal to LLM_NUM_CTX")
         return self
 
-    @model_validator(mode="after")
-    def validate_topic_threshold_alias(self) -> "Settings":
-        if abs(self.TOPIC_RESET_SIMILARITY_THRESHOLD - self.TOPIC_RESET_SIM_THRESHOLD) > 1e-6:
-            raise ValueError("TOPIC_RESET_SIMILARITY_THRESHOLD and TOPIC_RESET_SIM_THRESHOLD must match")
-        return self
+    def is_plain_log_mode(self) -> bool:
+        return self.LOG_DATA_MODE.strip().lower() == "plain"
 
-    @computed_field
-    @property
-    def database_url(self) -> str:
-        return self.DATABASE_URL
+    def is_debug_allowed(self, debug_requested: bool, user_role: str | None) -> bool:
+        if not debug_requested:
+            return False
+        return (user_role or "").strip().lower() == self.DEBUG_ADMIN_ROLE.strip().lower()
 
 
 settings = Settings()

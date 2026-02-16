@@ -4,7 +4,8 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from app.services.retrieval import lexical_score, vector_score
+from app.core.math_utils import cosine_similarity
+from app.services.retrieval import lexical_score
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def _semantic_similarity(sentence: str, chunk: str) -> float:
         # Fallback when model/runtime deps are unavailable.
         s_tokens = sentence.lower().split()
         c_tokens = chunk.lower().split()
-        return vector_score([1.0 if t in c_tokens else 0.0 for t in s_tokens], [1.0 for _ in s_tokens])
+        return cosine_similarity([1.0 if t in c_tokens else 0.0 for t in s_tokens], [1.0 for _ in s_tokens])
 
 
 def verify_answer(answer: str, chunks: list[str], min_similarity: float, min_lexical_overlap: float) -> tuple[bool, dict[str, Any]]:

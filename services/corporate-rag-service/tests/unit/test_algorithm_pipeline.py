@@ -189,8 +189,8 @@ def test_hybrid_rank_with_normalization_adds_raw_and_norm_fields():
 
 
 def test_hybrid_rank_deduplicates_before_sort_and_uses_chunk_id_tiebreak(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
     candidates = [
         {"chunk_id": "b", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 0.5, "rerank_score": 0.0},
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 0.5, "rerank_score": 0.0},
@@ -202,8 +202,8 @@ def test_hybrid_rank_deduplicates_before_sort_and_uses_chunk_id_tiebreak(monkeyp
 
 
 def test_hybrid_rank_applies_configured_weighted_merge(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.9)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.1)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.9)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.1)
     candidates = [
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 10.0, "vec_score": 0.1, "rerank_score": 0.0},
         {"chunk_id": "b", "chunk_text": "policy", "embedding": [0.0, 1.0], "lex_score": 0.1, "vec_score": 0.9, "rerank_score": 0.0},
@@ -215,8 +215,8 @@ def test_hybrid_rank_applies_configured_weighted_merge(monkeypatch):
 
 
 def test_hybrid_rank_final_score_matches_weighted_formula(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
     candidates = [
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 0.2, "vec_score": 0.8, "rerank_score": 0.6},
         {"chunk_id": "b", "chunk_text": "policy", "embedding": [0.0, 1.0], "lex_score": 0.6, "vec_score": 0.2, "rerank_score": 0.1},
@@ -228,8 +228,8 @@ def test_hybrid_rank_final_score_matches_weighted_formula(monkeypatch):
         assert row["final_score"] == pytest.approx(expected)
 
 def test_hybrid_rank_tie_breaks_by_source_preference_then_chunk_id(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
     candidates = [
         {"chunk_id": "b", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 2},
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 1},
@@ -251,8 +251,8 @@ def test_context_budget_respects_safety_margin_and_truncates_tail(monkeypatch):
 
 
 def test_hybrid_rank_is_stable_across_repeated_runs(monkeypatch):
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_VECTOR", 0.7)
-    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_W_FTS", 0.3)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_VECTOR", 0.7)
+    monkeypatch.setattr("app.services.retrieval.settings.HYBRID_WEIGHT_FTS", 0.3)
     candidates = [
         {"chunk_id": "b", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 2},
         {"chunk_id": "a", "chunk_text": "policy", "embedding": [1.0, 0.0], "lex_score": 1.0, "vec_score": 1.0, "source_preference": 2},

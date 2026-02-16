@@ -1,5 +1,9 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Index, Integer, PrimaryKeyConstraint, String, Text, UniqueConstraint, func
@@ -100,7 +104,7 @@ class IngestJobs(Base):
     job_type: Mapped[str] = mapped_column(Enum(*JOB_TYPE, name="job_type"))
     job_status: Mapped[str] = mapped_column(Enum(*JOB_STATUS, name="job_status"), default="queued")
     requested_by: Mapped[str] = mapped_column(String(255))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -232,8 +236,8 @@ class Conversations(Base):
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     status: Mapped[str] = mapped_column(Enum(*CONVERSATION_STATUS, name="conversation_status"), default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ConversationTurns(Base):
@@ -245,7 +249,7 @@ class ConversationTurns(Base):
     turn_index: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(Enum(*CONVERSATION_ROLE, name="conversation_role"))
     text: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
@@ -262,7 +266,7 @@ class QueryResolutions(Base):
     topic_shift_detected: Mapped[bool] = mapped_column(default=False)
     needs_clarification: Mapped[bool] = mapped_column(default=False)
     clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class RetrievalTraceItems(Base):
@@ -283,7 +287,7 @@ class RetrievalTraceItems(Base):
     used_in_context: Mapped[bool] = mapped_column(default=False)
     used_in_answer: Mapped[bool] = mapped_column(default=False)
     citation_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ConversationSummaries(Base):
@@ -297,4 +301,4 @@ class ConversationSummaries(Base):
     summary_version: Mapped[int] = mapped_column(Integer, primary_key=True)
     summary_text: Mapped[str] = mapped_column(Text)
     covers_turn_index_to: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

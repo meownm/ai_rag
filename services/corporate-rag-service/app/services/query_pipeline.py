@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 from app.core.config import settings
+from app.core.token_utils import (  # noqa: F401
+    TRUNCATION_MARKER,
+    estimate_tokens,
+    truncate_text_to_tokens as _truncate_text_to_tokens,
+    word_count,
+)
+
+# Re-export for backward compatibility with callers using query_pipeline.token_count
+token_count = word_count
 
 MAX_CONTEXT_WORDS = 12000
 DEFAULT_TOP_K = settings.DEFAULT_TOP_K
@@ -8,39 +17,6 @@ USE_CONTEXTUAL_EXPANSION = settings.USE_CONTEXTUAL_EXPANSION
 NEIGHBOR_WINDOW = settings.NEIGHBOR_WINDOW
 USE_TOKEN_BUDGET_ASSEMBLY = settings.USE_TOKEN_BUDGET_ASSEMBLY
 MAX_CONTEXT_TOKENS = settings.MAX_CONTEXT_TOKENS
-TRUNCATION_MARKER = "\n[TRUNCATED_BY_TOKEN_BUDGET]"
-
-
-def token_count(text: str) -> int:
-    return len([t for t in text.split() if t])
-
-
-def _tiktoken_estimate(text: str) -> int:
-    import tiktoken  # type: ignore
-
-    enc = tiktoken.get_encoding("cl100k_base")
-    return len(enc.encode(text))
-
-
-def estimate_tokens(text: str) -> int:
-    try:
-        return _tiktoken_estimate(text)
-    except Exception:  # noqa: BLE001
-        words = token_count(text)
-        return int(max(1, round(words * 1.33)))
-
-
-def _truncate_text_to_tokens(text: str, budget_tokens: int) -> str:
-    if budget_tokens <= 0:
-        return TRUNCATION_MARKER
-
-    words = text.split()
-    if not words:
-        return TRUNCATION_MARKER
-
-    approx_words_budget = max(1, int(budget_tokens / 1.33))
-    truncated = " ".join(words[:approx_words_budget])
-    return f"{truncated}{TRUNCATION_MARKER}"
 
 
 def expand_neighbors(

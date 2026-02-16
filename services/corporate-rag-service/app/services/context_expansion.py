@@ -29,14 +29,8 @@ class ContextExpansionEngine:
 
     @staticmethod
     def _cosine(v1: list[float], v2: list[float]) -> float:
-        if not v1 or not v2:
-            return 0.0
-        dot = sum(a * b for a, b in zip(v1, v2))
-        n1 = sum(a * a for a in v1) ** 0.5
-        n2 = sum(b * b for b in v2) ** 0.5
-        if n1 == 0.0 or n2 == 0.0:
-            return 0.0
-        return dot / (n1 * n2)
+        from app.core.math_utils import cosine_similarity
+        return cosine_similarity(v1, v2)
 
     def expand(
         self,
